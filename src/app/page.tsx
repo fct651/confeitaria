@@ -102,7 +102,7 @@ export default function Home() {
     setNewFlavorPrice('');
   };
 
-  const handleRemoveFlavor = (flavorName) => {
+  const handleRemoveFlavor = (flavorName: string) => {
     setFlavors((prev) => prev.filter((f) => f.name !== flavorName));
     if (flavor === flavorName) {
       setFlavor('');
