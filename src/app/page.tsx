@@ -1,13 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { Cake, Printer, DollarSign, Settings, Plus, Trash2 } from 'lucide-react';
+import { Cake, Printer, DollarSign, Settings, Plus, Trash2, ChevronDown } from 'lucide-react';
 
 interface Flavor {
   name: string;
@@ -28,53 +22,40 @@ const formatBRL = (value: number) =>
 
 const toNumber = (s: string) => {
   if (!s) return NaN;
-  // Normaliza vírgula para ponto
   const normalized = s.replace(/\s/g, '').replace(',', '.');
   const n = Number(normalized);
   return Number.isFinite(n) ? n : NaN;
 };
 
 export default function Home() {
-  const [size, setSize] = useState<string>('');
-  const [flavor, setFlavor] = useState<string>('');
-  const [doughColor, setDoughColor] = useState<string>('');
-  const [flavors, setFlavors] = useState<Flavor[]>(defaultFlavors);
-  const [showNote, setShowNote] = useState<boolean>(false);
-  const [showManageFlavors, setShowManageFlavors] = useState<boolean>(false);
-  const [newFlavorName, setNewFlavorName] = useState<string>('');
-  const [newFlavorPrice, setNewFlavorPrice] = useState<string>('');
-  const [today, setToday] = useState<string>('');
+  const [size, setSize] = useState('');
+  const [flavor, setFlavor] = useState('');
+  const [doughColor, setDoughColor] = useState('');
+  const [flavors, setFlavors] = useState(defaultFlavors);
+  const [showNote, setShowNote] = useState(false);
+  const [showManageFlavors, setShowManageFlavors] = useState(false);
+  const [newFlavorName, setNewFlavorName] = useState('');
+  const [newFlavorPrice, setNewFlavorPrice] = useState('');
+  const [today, setToday] = useState('');
 
-  // Evita mismatch de hidratação com data
   useEffect(() => {
     setToday(new Date().toLocaleDateString('pt-BR'));
-  }, []);
-
-  // Carrega sabores do localStorage
-  useEffect(() => {
-    try {
-      const storedFlavors = localStorage.getItem('cakeFlavors');
-      if (storedFlavors) {
-        const parsed: unknown = JSON.parse(storedFlavors);
-        if (
-          Array.isArray(parsed) &&
-          parsed.every((p) => p && typeof (p as any).name === 'string' && typeof (p as any).pricePerKg === 'number')
-        ) {
-          setFlavors(parsed as Flavor[]);
+    
+    const storedFlavors = window.localStorage.getItem('cakeFlavors');
+    if (storedFlavors) {
+      try {
+        const parsed = JSON.parse(storedFlavors);
+        if (Array.isArray(parsed)) {
+          setFlavors(parsed);
         }
+      } catch (err) {
+        console.error('Falha ao carregar sabores', err);
       }
-    } catch (err) {
-      console.error('Falha ao carregar sabores do localStorage', err);
     }
   }, []);
 
-  // Salva sabores no localStorage
   useEffect(() => {
-    try {
-      localStorage.setItem('cakeFlavors', JSON.stringify(flavors));
-    } catch (err) {
-      console.error('Falha ao salvar sabores no localStorage', err);
-    }
+    window.localStorage.setItem('cakeFlavors', JSON.stringify(flavors));
   }, [flavors]);
 
   const selectedFlavor = useMemo(
@@ -107,7 +88,6 @@ export default function Home() {
 
     if (!name || !Number.isFinite(parsedPrice) || parsedPrice <= 0) return;
 
-    // Se já existir, atualiza o preço. Caso contrário, adiciona novo.
     setFlavors((prev) => {
       const exists = prev.some((f) => f.name.toLowerCase() === name.toLowerCase());
       if (exists) {
@@ -122,7 +102,7 @@ export default function Home() {
     setNewFlavorPrice('');
   };
 
-  const handleRemoveFlavor = (flavorName: string) => {
+  const handleRemoveFlavor = (flavorName) => {
     setFlavors((prev) => prev.filter((f) => f.name !== flavorName));
     if (flavor === flavorName) {
       setFlavor('');
@@ -130,170 +110,203 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-background p-4">
-      {/* Tudo acima da nota fica oculto na impressão */}
-      <div className="max-w-md mx-auto space-y-6 print:hidden">
+    <div className="min-h-screen bg-gray-50 p-4">
+      <style dangerouslySetInnerHTML={{__html: `
+        @media print {
+          body * {
+            visibility: hidden;
+          }
+          .print-content, .print-content * {
+            visibility: visible;
+          }
+          .print-content {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+          }
+          .no-print {
+            display: none !important;
+          }
+        }
+      `}} />
+
+      <div className="max-w-md mx-auto space-y-6 no-print">
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-primary flex items-center justify-center gap-2">
+          <h1 className="text-3xl font-bold text-pink-600 flex items-center justify-center gap-2">
             <Cake className="w-8 h-8" />
             Pronta Entrega
           </h1>
-          <p className="text-muted-foreground mt-2">Sistema de Encomendas de Bolo</p>
+          <p className="text-gray-600 mt-2">Sistema de Encomendas de Bolo</p>
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
+        <div className="bg-white rounded-lg shadow-md">
+          <div className="p-4 border-b">
+            <h2 className="text-xl font-semibold flex items-center gap-2">
               <Cake className="w-5 h-5" />
               Novo Pedido
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
+            </h2>
+          </div>
+          <div className="p-4 space-y-4">
             <div>
-              <Label htmlFor="size">Tamanho (kg)</Label>
-              <Input
+              <label htmlFor="size" className="block text-sm font-medium mb-1">
+                Tamanho (kg)
+              </label>
+              <input
                 id="size"
                 type="text"
                 inputMode="decimal"
-                pattern="[0-9]*[.,]?[0-9]*"
                 value={size}
                 onChange={(e) => setSize(e.target.value)}
                 placeholder="Ex: 1,5"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
               />
             </div>
 
             <div>
-              <Label htmlFor="flavor">Sabor do Bolo</Label>
-              <Select value={flavor} onValueChange={setFlavor}>
-                <SelectTrigger id="flavor">
-                  <SelectValue placeholder="Selecione o sabor" />
-                </SelectTrigger>
-                <SelectContent>
-                  {flavors.map((f) => (
-                    <SelectItem key={f.name} value={f.name}>
-                      {f.name} - {formatBRL(f.pricePerKg)}/kg
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <label htmlFor="flavor" className="block text-sm font-medium mb-1">
+                Sabor do Bolo
+              </label>
+              <select
+                id="flavor"
+                value={flavor}
+                onChange={(e) => setFlavor(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
+              >
+                <option value="">Selecione o sabor</option>
+                {flavors.map((f) => (
+                  <option key={f.name} value={f.name}>
+                    {f.name} - {formatBRL(f.pricePerKg)}/kg
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
-              <Label htmlFor="doughColor">Cor da Massa</Label>
-              <Select value={doughColor} onValueChange={setDoughColor}>
-                <SelectTrigger id="doughColor">
-                  <SelectValue placeholder="Selecione a cor" />
-                </SelectTrigger>
-                <SelectContent>
-                  {doughColors.map((color) => (
-                    <SelectItem key={color} value={color}>
-                      {color}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <label htmlFor="doughColor" className="block text-sm font-medium mb-1">
+                Cor da Massa
+              </label>
+              <select
+                id="doughColor"
+                value={doughColor}
+                onChange={(e) => setDoughColor(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
+              >
+                <option value="">Selecione a cor</option>
+                {doughColors.map((color) => (
+                  <option key={color} value={color}>
+                    {color}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {price > 0 && (
-              <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
+              <div className="flex items-center gap-2 p-3 bg-green-50 rounded-lg border border-green-200">
                 <DollarSign className="w-5 h-5 text-green-600" />
-                <span className="font-semibold">Preço Total: {formatBRL(price)}</span>
+                <span className="font-semibold text-green-800">Preço Total: {formatBRL(price)}</span>
               </div>
             )}
 
-            <Button onClick={handleGenerateNote} className="w-full" disabled={!isFormValid}>
+            <button
+              onClick={handleGenerateNote}
+              disabled={!isFormValid}
+              className="w-full bg-pink-600 text-white py-2 px-4 rounded-md hover:bg-pink-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            >
               Gerar Nota
-            </Button>
-          </CardContent>
-        </Card>
+            </button>
+          </div>
+        </div>
 
-        <Collapsible open={showManageFlavors} onOpenChange={setShowManageFlavors}>
-          <CollapsibleTrigger asChild>
-            <Button variant="outline" className="w-full">
-              <Settings className="w-4 h-4 mr-2" />
-              Gerenciar Sabores
-            </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="space-y-4 mt-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Adicionar/Atualizar Sabor</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
+        <button
+          onClick={() => setShowManageFlavors(!showManageFlavors)}
+          className="w-full bg-white border border-gray-300 py-2 px-4 rounded-md hover:bg-gray-50 flex items-center justify-center gap-2 transition-colors"
+        >
+          <Settings className="w-4 h-4" />
+          Gerenciar Sabores
+          <ChevronDown className={`w-4 h-4 transition-transform ${showManageFlavors ? 'rotate-180' : ''}`} />
+        </button>
+
+        {showManageFlavors && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-lg shadow-md">
+              <div className="p-4 border-b">
+                <h3 className="text-lg font-semibold">Adicionar/Atualizar Sabor</h3>
+              </div>
+              <div className="p-4 space-y-4">
                 <div>
-                  <Label htmlFor="newFlavorName">Nome do Sabor</Label>
-                  <Input
+                  <label htmlFor="newFlavorName" className="block text-sm font-medium mb-1">
+                    Nome do Sabor
+                  </label>
+                  <input
                     id="newFlavorName"
                     value={newFlavorName}
                     onChange={(e) => setNewFlavorName(e.target.value)}
                     placeholder="Ex: Brigadeiro"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
                   />
                 </div>
                 <div>
-                  <Label htmlFor="newFlavorPrice">Preço por kg (R$)</Label>
-                  <Input
+                  <label htmlFor="newFlavorPrice" className="block text-sm font-medium mb-1">
+                    Preço por kg (R$)
+                  </label>
+                  <input
                     id="newFlavorPrice"
                     type="text"
                     inputMode="decimal"
-                    pattern="[0-9]*[.,]?[0-9]*"
                     value={newFlavorPrice}
                     onChange={(e) => setNewFlavorPrice(e.target.value)}
                     placeholder="Ex: 60,00"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
                   />
                 </div>
-                <Button
+                <button
                   onClick={handleAddFlavor}
-                  className="w-full"
-                  disabled={
-                    !newFlavorName.trim() ||
-                    !Number.isFinite(toNumber(newFlavorPrice)) ||
-                    toNumber(newFlavorPrice) <= 0
-                  }
+                  disabled={!newFlavorName.trim() || !Number.isFinite(toNumber(newFlavorPrice)) || toNumber(newFlavorPrice) <= 0}
+                  className="w-full bg-pink-600 text-white py-2 px-4 rounded-md hover:bg-pink-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors"
                 >
-                  <Plus className="w-4 h-4 mr-2" />
+                  <Plus className="w-4 h-4" />
                   Salvar Sabor
-                </Button>
-              </CardContent>
-            </Card>
+                </button>
+              </div>
+            </div>
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Sabores Existentes</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
+            <div className="bg-white rounded-lg shadow-md">
+              <div className="p-4 border-b">
+                <h3 className="text-lg font-semibold">Sabores Existentes</h3>
+              </div>
+              <div className="p-4 space-y-2">
                 {flavors.map((f) => (
                   <div key={f.name} className="flex items-center justify-between p-2 border rounded">
                     <span>
                       {f.name} - {formatBRL(f.pricePerKg)}/kg
                     </span>
-                    <Button
-                      variant="destructive"
-                      size="sm"
+                    <button
                       onClick={() => handleRemoveFlavor(f.name)}
                       disabled={flavors.length <= 1}
+                      className="bg-red-600 text-white p-2 rounded hover:bg-red-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
                     >
                       <Trash2 className="w-4 h-4" />
-                    </Button>
+                    </button>
                   </div>
                 ))}
-              </CardContent>
-            </Card>
-          </CollapsibleContent>
-        </Collapsible>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Nota de pedido (mostrada na tela e impressa sozinha) */}
       {showNote && (
-        <div className="max-w-md mx-auto">
-          <Card className="print:shadow-none print:border-none">
-            <CardHeader className="print:text-center">
-              <CardTitle className="text-2xl print:text-3xl">Pronta Entrega</CardTitle>
-              <p className="text-sm text-muted-foreground print:text-base">Nota de Pedido</p>
-            </CardHeader>
-            <CardContent className="space-y-3 print:space-y-4">
-              <div className="grid grid-cols-2 gap-4 print:grid-cols-1">
+        <div className="max-w-md mx-auto print-content">
+          <div className="bg-white rounded-lg shadow-md">
+            <div className="p-6 border-b text-center">
+              <h2 className="text-3xl font-bold">Pronta Entrega</h2>
+              <p className="text-gray-600 mt-1">Nota de Pedido</p>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <strong>Tamanho:</strong> {Number.isFinite(kg) ? `${kg}` : size} kg
+                  <strong>Tamanho:</strong> {Number.isFinite(kg) ? kg : size} kg
                 </div>
                 <div>
                   <strong>Sabor:</strong> {flavor}
@@ -305,17 +318,20 @@ export default function Home() {
                   <strong>Preço Total:</strong> {formatBRL(price)}
                 </div>
               </div>
-              <div className="text-center text-sm text-muted-foreground print:text-base">
+              <div className="text-center text-sm text-gray-600">
                 Data: {today || '—'}
               </div>
-            </CardContent>
-            <div className="p-4 print:hidden">
-              <Button onClick={handlePrint} variant="outline" className="w-full">
-                <Printer className="w-4 h-4 mr-2" />
-                Imprimir Nota
-              </Button>
             </div>
-          </Card>
+            <div className="p-4 no-print">
+              <button
+                onClick={handlePrint}
+                className="w-full bg-white border border-gray-300 py-2 px-4 rounded-md hover:bg-gray-50 flex items-center justify-center gap-2 transition-colors"
+              >
+                <Printer className="w-4 h-4" />
+                Imprimir Nota
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
