@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { Calendar, ChevronLeft, ChevronRight, Printer, Trash2, CheckCircle } from 'lucide-react';
 
@@ -115,15 +116,18 @@ async function storageGetAll<K extends StoreName>(store: K) {
 async function storagePut<K extends StoreName>(store: K, value: StoreMap[K]) {
   if (hasIndexedDB) return idbPut(store, value);
   if (!isBrowser) return;
-  const current = readFromLocalStorage(store) as any[];
-  const idx = current.findIndex((x) => x.id === (value as any).id);
-  if (idx >= 0) current[idx] = value;
-  else current.push(value);
+
+  type ItemWithId = StoreMap[K] & { id: string };
+
+  const current = readFromLocalStorage(store) as ItemWithId[];
+  const idx = current.findIndex((x) => x.id === (value as ItemWithId).id);
+  if (idx >= 0) current[idx] = value as ItemWithId;
+  else current.push(value as ItemWithId);
   window.localStorage.setItem(lsKeys[store], JSON.stringify(current));
   try {
     if ('BroadcastChannel' in window) {
       const bc = new BroadcastChannel('cake_sync');
-      bc.postMessage({ type: 'orders_changed', id: (value as any).id });
+      bc.postMessage({ type: 'orders_changed', id: (value as ItemWithId).id });
       bc.close();
     }
   } catch {
@@ -133,7 +137,10 @@ async function storagePut<K extends StoreName>(store: K, value: StoreMap[K]) {
 async function storageDelete<K extends StoreName>(store: K, key: string) {
   if (hasIndexedDB) return idbDelete(store, key);
   if (!isBrowser) return;
-  const current = readFromLocalStorage(store) as any[];
+
+  type ItemWithId = StoreMap[K] & { id: string };
+
+  const current = readFromLocalStorage(store) as ItemWithId[];
   const next = current.filter((x) => x.id !== key);
   window.localStorage.setItem(lsKeys[store], JSON.stringify(next));
   try {
@@ -217,7 +224,7 @@ export default function DeliveriesDashboard() {
       if ('BroadcastChannel' in window) {
         bc = new BroadcastChannel('cake_sync');
         bc.onmessage = (ev) => {
-          if (ev?.data?.type === 'orders_changed') {
+          if ((ev as MessageEvent)?.data?.type === 'orders_changed') {
             load();
           }
         };
@@ -266,7 +273,7 @@ export default function DeliveriesDashboard() {
   // Dias do mês corrente (grid de 6x7)
   const firstDay = useMemo(() => new Date(year, month, 1), [year, month]);
   const daysInMonth = useMemo(() => new Date(year, month + 1, 0).getDate(), [year, month]);
-  const leading = useMemo(() => (new Date(year, month, 1).getDay() + 7) % 7, [year, month]); // 0=Dom
+  const leading = useMemo(() => (firstDay.getDay() + 7) % 7, [firstDay]); // 0=Dom
   const totalCells = 42;
   const cells = useMemo(() => {
     const arr: {
@@ -424,12 +431,12 @@ export default function DeliveriesDashboard() {
             <h1 className="text-2xl font-bold text-indigo-900">Dashboard de Entregas</h1>
           </div>
           <div className="flex items-center gap-2">
-            <a
+            <Link
               href="/"
               className="no-print inline-flex items-center px-3 py-2 rounded-xl border border-indigo-200 bg-white hover:bg-indigo-50 text-indigo-700 text-sm"
             >
               Voltar aos Pedidos
-            </a>
+            </Link>
             <button
               onClick={printDay}
               className="no-print inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 text-sm"
