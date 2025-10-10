@@ -1,7 +1,17 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Cake, Printer, DollarSign, Settings, Plus, Trash2, ChevronDown, User, Calendar } from 'lucide-react';
+import {
+  Cake,
+  Printer,
+  DollarSign,
+  Settings,
+  Plus,
+  Trash2,
+  ChevronDown,
+  User,
+  Calendar,
+} from 'lucide-react';
 
 interface Flavor {
   name: string;
@@ -14,6 +24,8 @@ interface Client {
   phone: string;
 }
 
+type StoreName = 'flavors' | 'clients';
+
 const defaultFlavors: Flavor[] = [
   { name: 'Chocolate', pricePerKg: 50 },
   { name: 'Baunilha', pricePerKg: 45 },
@@ -21,7 +33,7 @@ const defaultFlavors: Flavor[] = [
   { name: 'Limão', pricePerKg: 40 },
 ];
 
-const doughColors = ['Branco', 'Chocolate', 'Rosa', 'Azul', 'Verde'];
+const doughColors = ['Branco', 'Chocolate', 'Rosa', 'Azul', 'Verde', 'Vermelho'];
 
 const formatBRL = (value: number) =>
   new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -33,22 +45,153 @@ const toNumber = (s: string) => {
   return Number.isFinite(n) ? n : NaN;
 };
 
+/* =========================
+   IndexedDB Helper (com fallback)
+   ========================= */
+const hasIndexedDB = typeof window !== 'undefined' && 'indexedDB' in window;
+
+let dbPromise: Promise<IDBDatabase> | null = null;
+
+function getDB(): Promise<IDBDatabase> {
+  if (!hasIndexedDB) {
+    return Promise.reject(new Error('IndexedDB não suportado neste ambiente.'));
+  }
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
+    const request = window.indexedDB.open('cakeDB', 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('flavors')) {
+        db.createObjectStore('flavors', { keyPath: 'name' });
+      }
+      if (!db.objectStoreNames.contains('clients')) {
+        db.createObjectStore('clients', { keyPath: 'id' });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
+    request.onerror = () => reject(request.error);
+  });
+
+  return dbPromise;
+}
+
+async function idbGetAll<T = any>(storeName: StoreName): Promise<T[]> {
+  const db = await getDB();
+  return new Promise<T[]>((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const store = tx.objectStore(storeName);
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbPut<T = any>(storeName: StoreName, value: T): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).put(value as any);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+async function idbBulkPut<T = any>(storeName: StoreName, values: T[]): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    for (const v of values) store.put(v as any);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+async function idbDelete(storeName: StoreName, key: IDBValidKey): Promise<void> {
+  const db = await getDB();
+  return new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+// Fallback simples para localStorage se IndexedDB não existir
+const lsKeys: Record<StoreName, string> = {
+  flavors: 'cakeFlavors',
+  clients: 'cakeClients',
+};
+
+const storage = {
+  async getAll<T = any>(store: StoreName): Promise<T[]> {
+    if (hasIndexedDB) return idbGetAll<T>(store);
+    const raw = window.localStorage.getItem(lsKeys[store]);
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  },
+  async bulkPut<T = any>(store: StoreName, values: T[]) {
+    if (hasIndexedDB) return idbBulkPut<T>(store, values);
+    window.localStorage.setItem(lsKeys[store], JSON.stringify(values));
+  },
+  async put<T = any>(store: StoreName, value: T) {
+    if (hasIndexedDB) return idbPut<T>(store, value);
+    const keyProp = store === 'flavors' ? 'name' : 'id';
+    const current = await this.getAll<any>(store);
+    const idx = current.findIndex((x: any) => x[keyProp] === (value as any)[keyProp]);
+    if (idx >= 0) current[idx] = value;
+    else current.push(value);
+    window.localStorage.setItem(lsKeys[store], JSON.stringify(current));
+  },
+  async delete(store: StoreName, key: string) {
+    if (hasIndexedDB) return idbDelete(store, key);
+    const keyProp = store === 'flavors' ? 'name' : 'id';
+    const current = await this.getAll<any>(store);
+    const next = current.filter((x: any) => x[keyProp] !== key);
+    window.localStorage.setItem(lsKeys[store], JSON.stringify(next));
+  },
+};
+
+/* =========================
+   Utils visuais
+   ========================= */
+function formatPhone(input: string) {
+  const d = input.replace(/\D/g, '').slice(0, 11);
+  if (d.length <= 2) return d;
+  if (d.length <= 6) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
+  if (d.length <= 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+}
+
 export default function Home() {
   // Estados do pedido
   const [orderType, setOrderType] = useState<'ready' | 'custom'>('ready');
   const [size, setSize] = useState('');
   const [flavor, setFlavor] = useState('');
   const [doughColor, setDoughColor] = useState('');
-  const [flavors, setFlavors] = useState(defaultFlavors);
+  const [flavors, setFlavors] = useState<Flavor[]>([]);
   const [showNote, setShowNote] = useState(false);
-  
+
   // Estados do cliente
   const [clients, setClients] = useState<Client[]>([]);
   const [selectedClientId, setSelectedClientId] = useState('');
   const [clientName, setClientName] = useState('');
   const [clientPhone, setClientPhone] = useState('');
   const [deliveryDate, setDeliveryDate] = useState('');
-  
+
   // Estados de gerenciamento
   const [showManageFlavors, setShowManageFlavors] = useState(false);
   const [showManageClients, setShowManageClients] = useState(false);
@@ -56,48 +199,78 @@ export default function Home() {
   const [newFlavorPrice, setNewFlavorPrice] = useState('');
   const [today, setToday] = useState('');
 
+  // Carregamento e feedback
+  const [initializing, setInitializing] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
   useEffect(() => {
     setToday(new Date().toLocaleDateString('pt-BR'));
-    
-    // Carrega sabores
-    const storedFlavors = window.localStorage.getItem('cakeFlavors');
-    if (storedFlavors) {
+
+    let ignore = false;
+
+    async function init() {
       try {
-        const parsed = JSON.parse(storedFlavors);
-        if (Array.isArray(parsed)) {
-          setFlavors(parsed);
+        // Carrega sabores
+        let storedFlavors = await storage.getAll<Flavor>('flavors');
+        // Migra do localStorage para IDB, se necessário
+        if (hasIndexedDB && storedFlavors.length === 0) {
+          const localRaw = window.localStorage.getItem(lsKeys.flavors);
+          if (localRaw) {
+            try {
+              const parsed = JSON.parse(localRaw);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                await storage.bulkPut('flavors', parsed);
+                storedFlavors = parsed;
+              }
+              window.localStorage.removeItem(lsKeys.flavors);
+            } catch {
+              // ignore
+            }
+          }
         }
+        if (storedFlavors.length === 0) {
+          await storage.bulkPut('flavors', defaultFlavors);
+          storedFlavors = defaultFlavors;
+        }
+        if (!ignore) setFlavors(storedFlavors);
+
+        // Carrega clientes
+        let storedClients = await storage.getAll<Client>('clients');
+        if (hasIndexedDB && storedClients.length === 0) {
+          const localRaw = window.localStorage.getItem(lsKeys.clients);
+          if (localRaw) {
+            try {
+              const parsed = JSON.parse(localRaw);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                await storage.bulkPut('clients', parsed);
+                storedClients = parsed;
+              }
+              window.localStorage.removeItem(lsKeys.clients);
+            } catch {
+              // ignore
+            }
+          }
+        }
+        if (!ignore) setClients(storedClients);
       } catch (err) {
-        console.error('Falha ao carregar sabores', err);
+        console.error('Falha ao inicializar dados', err);
+        if (!ignore) setMessage({ type: 'error', text: 'Falha ao carregar dados locais.' });
+      } finally {
+        if (!ignore) setInitializing(false);
       }
     }
-    
-    // Carrega clientes
-    const storedClients = window.localStorage.getItem('cakeClients');
-    if (storedClients) {
-      try {
-        const parsed = JSON.parse(storedClients);
-        if (Array.isArray(parsed)) {
-          setClients(parsed);
-        }
-      } catch (err) {
-        console.error('Falha ao carregar clientes', err);
-      }
-    }
+
+    init();
+    return () => {
+      ignore = true;
+    };
   }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem('cakeFlavors', JSON.stringify(flavors));
-  }, [flavors]);
-
-  useEffect(() => {
-    window.localStorage.setItem('cakeClients', JSON.stringify(clients));
-  }, [clients]);
 
   // Quando seleciona um cliente, preenche os dados
   useEffect(() => {
     if (selectedClientId) {
-      const client = clients.find(c => c.id === selectedClientId);
+      const client = clients.find((c) => c.id === selectedClientId);
       if (client) {
         setClientName(client.name);
         setClientPhone(client.phone);
@@ -133,34 +306,57 @@ export default function Home() {
     window.print();
   };
 
-  const handleAddFlavor = () => {
+  const handleAddFlavor = async () => {
     const name = newFlavorName.trim();
     const parsedPrice = toNumber(newFlavorPrice);
 
     if (!name || !Number.isFinite(parsedPrice) || parsedPrice <= 0) return;
 
-    setFlavors((prev) => {
-      const exists = prev.some((f) => f.name.toLowerCase() === name.toLowerCase());
-      if (exists) {
-        return prev.map((f) =>
-          f.name.toLowerCase() === name.toLowerCase() ? { ...f, pricePerKg: parsedPrice } : f
-        );
-      }
-      return [...prev, { name, pricePerKg: parsedPrice }];
-    });
+    try {
+      setSaving(true);
+      await storage.put<Flavor>('flavors', { name, pricePerKg: parsedPrice });
 
-    setNewFlavorName('');
-    setNewFlavorPrice('');
-  };
+      setFlavors((prev) => {
+        const exists = prev.some((f) => f.name.toLowerCase() === name.toLowerCase());
+        if (exists) {
+          return prev.map((f) =>
+            f.name.toLowerCase() === name.toLowerCase()
+              ? { ...f, pricePerKg: parsedPrice }
+              : f
+          );
+        }
+        return [...prev, { name, pricePerKg: parsedPrice }];
+      });
 
-  const handleRemoveFlavor = (flavorName: string) => {
-    setFlavors((prev) => prev.filter((f) => f.name !== flavorName));
-    if (flavor === flavorName) {
-      setFlavor('');
+      setNewFlavorName('');
+      setNewFlavorPrice('');
+      setMessage({ type: 'success', text: 'Sabor salvo com sucesso.' });
+    } catch (err) {
+      console.error(err);
+      setMessage({ type: 'error', text: 'Não foi possível salvar o sabor.' });
+    } finally {
+      setSaving(false);
     }
   };
 
-  const handleAddClient = () => {
+  const handleRemoveFlavor = async (flavorName: string) => {
+    try {
+      setSaving(true);
+      await storage.delete('flavors', flavorName);
+      setFlavors((prev) => prev.filter((f) => f.name !== flavorName));
+      if (flavor === flavorName) {
+        setFlavor('');
+      }
+      setMessage({ type: 'success', text: 'Sabor removido.' });
+    } catch (err) {
+      console.error(err);
+      setMessage({ type: 'error', text: 'Não foi possível remover o sabor.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAddClient = async () => {
     const name = clientName.trim();
     const phone = clientPhone.trim();
 
@@ -169,19 +365,39 @@ export default function Home() {
     const newClient: Client = {
       id: Date.now().toString(),
       name,
-      phone
+      phone,
     };
 
-    setClients((prev) => [...prev, newClient]);
-    setSelectedClientId(newClient.id);
+    try {
+      setSaving(true);
+      await storage.put<Client>('clients', newClient);
+      setClients((prev) => [...prev, newClient]);
+      setSelectedClientId(newClient.id);
+      setMessage({ type: 'success', text: 'Cliente salvo.' });
+    } catch (err) {
+      console.error(err);
+      setMessage({ type: 'error', text: 'Não foi possível salvar o cliente.' });
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const handleRemoveClient = (clientId: string) => {
-    setClients((prev) => prev.filter((c) => c.id !== clientId));
-    if (selectedClientId === clientId) {
-      setSelectedClientId('');
-      setClientName('');
-      setClientPhone('');
+  const handleRemoveClient = async (clientId: string) => {
+    try {
+      setSaving(true);
+      await storage.delete('clients', clientId);
+      setClients((prev) => prev.filter((c) => c.id !== clientId));
+      if (selectedClientId === clientId) {
+        setSelectedClientId('');
+        setClientName('');
+        setClientPhone('');
+      }
+      setMessage({ type: 'success', text: 'Cliente removido.' });
+    } catch (err) {
+      console.error(err);
+      setMessage({ type: 'error', text: 'Não foi possível remover o cliente.' });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -195,11 +411,14 @@ export default function Home() {
     setClientName('');
     setClientPhone('');
     setDeliveryDate('');
+    setMessage({ type: 'success', text: 'Pronto para um novo pedido.' });
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
-      <style dangerouslySetInnerHTML={{__html: `
+    <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-fuchsia-50 p-4 sm:p-6">
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
         @media print {
           body * {
             visibility: hidden;
@@ -217,229 +436,282 @@ export default function Home() {
             display: none !important;
           }
         }
-      `}} />
+      `,
+        }}
+      />
+
+      {/* Toast simples */}
+      {message && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl shadow-lg text-sm ${
+            message.type === 'success'
+              ? 'bg-emerald-600 text-white'
+              : 'bg-rose-600 text-white'
+          }`}
+          onAnimationEnd={() => {
+            // auto-close
+            setTimeout(() => setMessage(null), 2200);
+          }}
+        >
+          {message.text}
+        </div>
+      )}
 
       <div className="max-w-md mx-auto space-y-6 no-print">
+        {/* Header */}
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-pink-600 flex items-center justify-center gap-2">
-            <Cake className="w-8 h-8" />
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/70 ring-1 ring-pink-100 shadow-sm backdrop-blur">
+            <Cake className="w-4 h-4 text-pink-600" />
+            <span className="text-xs font-medium text-pink-700">
+              Sistema de Encomendas de Bolo
+            </span>
+          </div>
+          <h1 className="mt-3 text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-600 to-fuchsia-600 flex items-center justify-center gap-2">
             Pronta Entrega
           </h1>
-          <p className="text-gray-600 mt-2">Sistema de Encomendas de Bolo</p>
+          <p className="text-gray-600 mt-2">Crie e imprima notas rapidamente</p>
         </div>
 
-        <div className="bg-white rounded-lg shadow-md">
-          <div className="p-4 border-b">
-            <h2 className="text-xl font-semibold flex items-center gap-2">
-              <Cake className="w-5 h-5" />
+        {/* Card principal */}
+        <div className="bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60 rounded-2xl shadow-lg ring-1 ring-pink-100 overflow-hidden">
+          <div className="p-4 border-b bg-gradient-to-r from-pink-50 to-rose-50">
+            <h2 className="text-xl font-semibold flex items-center gap-2 text-pink-900">
+              <Cake className="w-5 h-5 text-pink-600" />
               Novo Pedido
             </h2>
           </div>
-          <div className="p-4 space-y-4">
-            {/* Tipo de Pedido */}
-            <div>
-              <label className="block text-sm font-medium mb-2">Tipo de Pedido</label>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setOrderType('ready')}
-                  className={`flex-1 py-2 px-4 rounded-md border transition-colors ${
-                    orderType === 'ready'
-                      ? 'bg-pink-600 text-white border-pink-600'
-                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                  }`}
-                >
-                  Pronta Entrega
-                </button>
-                <button
-                  onClick={() => setOrderType('custom')}
-                  className={`flex-1 py-2 px-4 rounded-md border transition-colors ${
-                    orderType === 'custom'
-                      ? 'bg-pink-600 text-white border-pink-600'
-                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                  }`}
-                >
-                  Encomenda
-                </button>
-              </div>
-            </div>
 
-            {/* Informações do Cliente (apenas para encomenda) */}
-            {orderType === 'custom' && (
-              <div className="space-y-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                <h3 className="font-semibold flex items-center gap-2 text-blue-900">
-                  <User className="w-4 h-4" />
-                  Dados do Cliente
-                </h3>
-                
+          <div className="p-4 space-y-4">
+            {/* Loading skeleton */}
+            {initializing ? (
+              <div className="space-y-3 animate-pulse">
+                <div className="h-10 bg-gray-200/60 rounded-xl" />
+                <div className="h-10 bg-gray-200/60 rounded-xl" />
+                <div className="h-10 bg-gray-200/60 rounded-xl" />
+                <div className="h-10 bg-gray-200/60 rounded-xl" />
+              </div>
+            ) : (
+              <>
+                {/* Tipo de Pedido */}
                 <div>
-                  <label htmlFor="clientSelect" className="block text-sm font-medium mb-1">
-                    Cliente Cadastrado
+                  <label className="block text-sm font-medium mb-2 text-gray-700">
+                    Tipo de Pedido
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setOrderType('ready')}
+                      className={`flex-1 py-2.5 px-4 rounded-xl border transition-all ${
+                        orderType === 'ready'
+                          ? 'bg-pink-600 text-white border-pink-600 shadow'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      Pronta Entrega
+                    </button>
+                    <button
+                      onClick={() => setOrderType('custom')}
+                      className={`flex-1 py-2.5 px-4 rounded-xl border transition-all ${
+                        orderType === 'custom'
+                          ? 'bg-pink-600 text-white border-pink-600 shadow'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      Encomenda
+                    </button>
+                  </div>
+                </div>
+
+                {/* Informações do Cliente (apenas para encomenda) */}
+                {orderType === 'custom' && (
+                  <div className="space-y-4 p-4 bg-blue-50 rounded-2xl border border-blue-200 ring-1 ring-blue-100">
+                    <h3 className="font-semibold flex items-center gap-2 text-blue-900">
+                      <User className="w-4 h-4" />
+                      Dados do Cliente
+                    </h3>
+
+                    <div>
+                      <label htmlFor="clientSelect" className="block text-sm font-medium mb-1">
+                        Cliente Cadastrado
+                      </label>
+                      <select
+                        id="clientSelect"
+                        value={selectedClientId}
+                        onChange={(e) => setSelectedClientId(e.target.value)}
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500 bg-white"
+                      >
+                        <option value="">Novo cliente ou selecione...</option>
+                        {clients.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name} - {c.phone}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label htmlFor="clientName" className="block text-sm font-medium mb-1">
+                        Nome do Cliente
+                      </label>
+                      <input
+                        id="clientName"
+                        value={clientName}
+                        onChange={(e) => setClientName(e.target.value)}
+                        placeholder="Digite o nome"
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="clientPhone" className="block text-sm font-medium mb-1">
+                        Telefone
+                      </label>
+                      <input
+                        id="clientPhone"
+                        value={clientPhone}
+                        onChange={(e) => setClientPhone(formatPhone(e.target.value))}
+                        placeholder="(00) 00000-0000"
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="deliveryDate" className="block text-sm font-medium mb-1">
+                        Data de Entrega
+                      </label>
+                      <input
+                        id="deliveryDate"
+                        type="date"
+                        value={deliveryDate}
+                        onChange={(e) => setDeliveryDate(e.target.value)}
+                        className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500"
+                      />
+                    </div>
+
+                    {!selectedClientId && clientName.trim() && clientPhone.trim() && (
+                      <button
+                        onClick={handleAddClient}
+                        disabled={saving}
+                        className="w-full bg-blue-600 text-white py-2.5 px-4 rounded-xl hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors text-sm"
+                      >
+                        <Plus className="w-4 h-4" />
+                        Salvar Cliente para Próximos Pedidos
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Dados do Bolo */}
+                <div>
+                  <label htmlFor="size" className="block text-sm font-medium mb-1">
+                    Tamanho (kg)
+                  </label>
+                  <input
+                    id="size"
+                    type="text"
+                    inputMode="decimal"
+                    value={size}
+                    onChange={(e) => setSize(e.target.value)}
+                    placeholder="Ex: 1,5"
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="flavor" className="block text-sm font-medium mb-1">
+                    Sabor do Bolo
                   </label>
                   <select
-                    id="clientSelect"
-                    value={selectedClientId}
-                    onChange={(e) => setSelectedClientId(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
+                    id="flavor"
+                    value={flavor}
+                    onChange={(e) => setFlavor(e.target.value)}
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500 bg-white"
                   >
-                    <option value="">Novo cliente ou selecione...</option>
-                    {clients.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} - {c.phone}
+                    <option value="">Selecione o sabor</option>
+                    {flavors.map((f) => (
+                      <option key={f.name} value={f.name}>
+                        {f.name} - {formatBRL(f.pricePerKg)}/kg
                       </option>
                     ))}
                   </select>
                 </div>
 
                 <div>
-                  <label htmlFor="clientName" className="block text-sm font-medium mb-1">
-                    Nome do Cliente
+                  <label htmlFor="doughColor" className="block text-sm font-medium mb-1">
+                    Cor da Massa
                   </label>
-                  <input
-                    id="clientName"
-                    value={clientName}
-                    onChange={(e) => setClientName(e.target.value)}
-                    placeholder="Digite o nome"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="clientPhone" className="block text-sm font-medium mb-1">
-                    Telefone
-                  </label>
-                  <input
-                    id="clientPhone"
-                    value={clientPhone}
-                    onChange={(e) => setClientPhone(e.target.value)}
-                    placeholder="(00) 00000-0000"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
-                  />
-                </div>
-
-                <div>
-                  <label htmlFor="deliveryDate" className="block text-sm font-medium mb-1">
-                    Data de Entrega
-                  </label>
-                  <input
-                    id="deliveryDate"
-                    type="date"
-                    value={deliveryDate}
-                    onChange={(e) => setDeliveryDate(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
-                  />
-                </div>
-
-                {!selectedClientId && clientName.trim() && clientPhone.trim() && (
-                  <button
-                    onClick={handleAddClient}
-                    className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 flex items-center justify-center gap-2 transition-colors text-sm"
+                  <select
+                    id="doughColor"
+                    value={doughColor}
+                    onChange={(e) => setDoughColor(e.target.value)}
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500 bg-white"
                   >
-                    <Plus className="w-4 h-4" />
-                    Salvar Cliente para Próximos Pedidos
-                  </button>
+                    <option value="">Selecione a cor</option>
+                    {doughColors.map((color) => (
+                      <option key={color} value={color}>
+                        {color}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {price > 0 && (
+                  <div className="flex items-center gap-2 p-3 bg-green-50 rounded-2xl border border-green-200 ring-1 ring-green-100">
+                    <DollarSign className="w-5 h-5 text-green-600" />
+                    <span className="font-semibold text-green-800">
+                      Preço Total: {formatBRL(price)}
+                    </span>
+                  </div>
                 )}
-              </div>
+
+                <button
+                  onClick={handleGenerateNote}
+                  disabled={!isFormValid}
+                  className="w-full bg-pink-600 text-white py-2.5 px-4 rounded-xl hover:bg-pink-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors shadow"
+                >
+                  Gerar Nota
+                </button>
+              </>
             )}
-
-            {/* Dados do Bolo */}
-            <div>
-              <label htmlFor="size" className="block text-sm font-medium mb-1">
-                Tamanho (kg)
-              </label>
-              <input
-                id="size"
-                type="text"
-                inputMode="decimal"
-                value={size}
-                onChange={(e) => setSize(e.target.value)}
-                placeholder="Ex: 1,5"
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="flavor" className="block text-sm font-medium mb-1">
-                Sabor do Bolo
-              </label>
-              <select
-                id="flavor"
-                value={flavor}
-                onChange={(e) => setFlavor(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
-              >
-                <option value="">Selecione o sabor</option>
-                {flavors.map((f) => (
-                  <option key={f.name} value={f.name}>
-                    {f.name} - {formatBRL(f.pricePerKg)}/kg
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label htmlFor="doughColor" className="block text-sm font-medium mb-1">
-                Cor da Massa
-              </label>
-              <select
-                id="doughColor"
-                value={doughColor}
-                onChange={(e) => setDoughColor(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
-              >
-                <option value="">Selecione a cor</option>
-                {doughColors.map((color) => (
-                  <option key={color} value={color}>
-                    {color}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {price > 0 && (
-              <div className="flex items-center gap-2 p-3 bg-green-50 rounded-lg border border-green-200">
-                <DollarSign className="w-5 h-5 text-green-600" />
-                <span className="font-semibold text-green-800">Preço Total: {formatBRL(price)}</span>
-              </div>
-            )}
-
-            <button
-              onClick={handleGenerateNote}
-              disabled={!isFormValid}
-              className="w-full bg-pink-600 text-white py-2 px-4 rounded-md hover:bg-pink-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-            >
-              Gerar Nota
-            </button>
           </div>
         </div>
 
         {/* Gerenciar Clientes */}
         <button
           onClick={() => setShowManageClients(!showManageClients)}
-          className="w-full bg-white border border-gray-300 py-2 px-4 rounded-md hover:bg-gray-50 flex items-center justify-center gap-2 transition-colors"
+          className="w-full bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60 border border-gray-200 py-2.5 px-4 rounded-2xl hover:bg-white transition-colors flex items-center justify-center gap-2 shadow-sm"
         >
-          <User className="w-4 h-4" />
-          Gerenciar Clientes
-          <ChevronDown className={`w-4 h-4 transition-transform ${showManageClients ? 'rotate-180' : ''}`} />
+          <User className="w-4 h-4 text-pink-600" />
+          <span className="font-medium">Gerenciar Clientes</span>
+          <ChevronDown
+            className={`w-4 h-4 transition-transform ${showManageClients ? 'rotate-180' : ''}`}
+          />
         </button>
 
         {showManageClients && (
-          <div className="bg-white rounded-lg shadow-md">
-            <div className="p-4 border-b">
-              <h3 className="text-lg font-semibold">Clientes Cadastrados</h3>
+          <div className="bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60 rounded-2xl shadow-lg ring-1 ring-pink-100">
+            <div className="p-4 border-b bg-gradient-to-r from-pink-50 to-rose-50 rounded-t-2xl">
+              <h3 className="text-lg font-semibold text-pink-900">Clientes Cadastrados</h3>
             </div>
             <div className="p-4 space-y-2">
               {clients.length === 0 ? (
                 <p className="text-gray-500 text-center py-4">Nenhum cliente cadastrado</p>
               ) : (
                 clients.map((c) => (
-                  <div key={c.id} className="flex items-center justify-between p-3 border rounded">
+                  <div
+                    key={c.id}
+                    className="flex items-center justify-between p-3 border rounded-xl hover:bg-gray-50"
+                  >
                     <div>
                       <div className="font-medium">{c.name}</div>
                       <div className="text-sm text-gray-600">{c.phone}</div>
                     </div>
                     <button
                       onClick={() => handleRemoveClient(c.id)}
-                      className="bg-red-600 text-white p-2 rounded hover:bg-red-700 transition-colors"
+                      disabled={saving}
+                      className="bg-rose-600 text-white p-2 rounded-xl hover:bg-rose-700 disabled:bg-gray-300 transition-colors"
+                      aria-label={`Remover cliente ${c.name}`}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -453,18 +725,20 @@ export default function Home() {
         {/* Gerenciar Sabores */}
         <button
           onClick={() => setShowManageFlavors(!showManageFlavors)}
-          className="w-full bg-white border border-gray-300 py-2 px-4 rounded-md hover:bg-gray-50 flex items-center justify-center gap-2 transition-colors"
+          className="w-full bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60 border border-gray-200 py-2.5 px-4 rounded-2xl hover:bg-white transition-colors flex items-center justify-center gap-2 shadow-sm"
         >
-          <Settings className="w-4 h-4" />
-          Gerenciar Sabores
-          <ChevronDown className={`w-4 h-4 transition-transform ${showManageFlavors ? 'rotate-180' : ''}`} />
+          <Settings className="w-4 h-4 text-pink-600" />
+          <span className="font-medium">Gerenciar Sabores</span>
+          <ChevronDown
+            className={`w-4 h-4 transition-transform ${showManageFlavors ? 'rotate-180' : ''}`}
+          />
         </button>
 
         {showManageFlavors && (
           <div className="space-y-4">
-            <div className="bg-white rounded-lg shadow-md">
-              <div className="p-4 border-b">
-                <h3 className="text-lg font-semibold">Adicionar/Atualizar Sabor</h3>
+            <div className="bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60 rounded-2xl shadow-lg ring-1 ring-pink-100">
+              <div className="p-4 border-b bg-gradient-to-r from-pink-50 to-rose-50 rounded-t-2xl">
+                <h3 className="text-lg font-semibold text-pink-900">Adicionar/Atualizar Sabor</h3>
               </div>
               <div className="p-4 space-y-4">
                 <div>
@@ -476,7 +750,7 @@ export default function Home() {
                     value={newFlavorName}
                     onChange={(e) => setNewFlavorName(e.target.value)}
                     placeholder="Ex: Brigadeiro"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500"
                   />
                 </div>
                 <div>
@@ -490,13 +764,18 @@ export default function Home() {
                     value={newFlavorPrice}
                     onChange={(e) => setNewFlavorPrice(e.target.value)}
                     placeholder="Ex: 60,00"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-pink-500"
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500"
                   />
                 </div>
                 <button
                   onClick={handleAddFlavor}
-                  disabled={!newFlavorName.trim() || !Number.isFinite(toNumber(newFlavorPrice)) || toNumber(newFlavorPrice) <= 0}
-                  className="w-full bg-pink-600 text-white py-2 px-4 rounded-md hover:bg-pink-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors"
+                  disabled={
+                    saving ||
+                    !newFlavorName.trim() ||
+                    !Number.isFinite(toNumber(newFlavorPrice)) ||
+                    toNumber(newFlavorPrice) <= 0
+                  }
+                  className="w-full bg-pink-600 text-white py-2.5 px-4 rounded-xl hover:bg-pink-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors shadow"
                 >
                   <Plus className="w-4 h-4" />
                   Salvar Sabor
@@ -504,20 +783,24 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="bg-white rounded-lg shadow-md">
-              <div className="p-4 border-b">
-                <h3 className="text-lg font-semibold">Sabores Existentes</h3>
+            <div className="bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60 rounded-2xl shadow-lg ring-1 ring-pink-100">
+              <div className="p-4 border-b bg-gradient-to-r from-pink-50 to-rose-50 rounded-t-2xl">
+                <h3 className="text-lg font-semibold text-pink-900">Sabores Existentes</h3>
               </div>
               <div className="p-4 space-y-2">
                 {flavors.map((f) => (
-                  <div key={f.name} className="flex items-center justify-between p-2 border rounded">
+                  <div
+                    key={f.name}
+                    className="flex items-center justify-between p-2.5 border rounded-xl hover:bg-gray-50"
+                  >
                     <span>
                       {f.name} - {formatBRL(f.pricePerKg)}/kg
                     </span>
                     <button
                       onClick={() => handleRemoveFlavor(f.name)}
-                      disabled={flavors.length <= 1}
-                      className="bg-red-600 text-white p-2 rounded hover:bg-red-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                      disabled={saving || flavors.length <= 1}
+                      className="bg-rose-600 text-white p-2 rounded-xl hover:bg-rose-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                      aria-label={`Remover sabor ${f.name}`}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -531,10 +814,10 @@ export default function Home() {
 
       {/* Nota de pedido */}
       {showNote && (
-        <div className="max-w-md mx-auto print-content">
-          <div className="bg-white rounded-lg shadow-md">
-            <div className="p-6 border-b text-center">
-              <h2 className="text-3xl font-bold">
+        <div className="max-w-md mx-auto mt-6 print-content">
+          <div className="bg-white rounded-2xl shadow-lg ring-1 ring-gray-100 overflow-hidden">
+            <div className="p-6 border-b text-center bg-gradient-to-r from-pink-50 to-rose-50">
+              <h2 className="text-3xl font-bold text-pink-900">
                 {orderType === 'ready' ? 'Pronta Entrega' : clientName}
               </h2>
               <p className="text-gray-600 mt-1">Nota de Pedido</p>
@@ -542,22 +825,35 @@ export default function Home() {
             <div className="p-6 space-y-4">
               {orderType === 'custom' && (
                 <div className="pb-4 border-b space-y-2">
-                  <div><strong>Cliente:</strong> {clientName}</div>
-                  <div><strong>Telefone:</strong> {clientPhone}</div>
+                  <div>
+                    <strong>Cliente:</strong> {clientName}
+                  </div>
+                  <div>
+                    <strong>Telefone:</strong> {clientPhone}
+                  </div>
                   <div className="flex items-center gap-2">
                     <Calendar className="w-4 h-4" />
-                    <strong>Data de Entrega:</strong> {new Date(deliveryDate + 'T00:00:00').toLocaleDateString('pt-BR')}
+                    <strong>Data de Entrega:</strong>{' '}
+                    {new Date(deliveryDate + 'T00:00:00').toLocaleDateString('pt-BR')}
                   </div>
                 </div>
               )}
-              
+
               <div className="space-y-2">
-                <div><strong>Tamanho:</strong> {Number.isFinite(kg) ? kg : size} kg</div>
-                <div><strong>Sabor:</strong> {flavor}</div>
-                <div><strong>Cor da Massa:</strong> {doughColor}</div>
-                <div className="text-lg"><strong>Preço Total:</strong> {formatBRL(price)}</div>
+                <div>
+                  <strong>Tamanho:</strong> {Number.isFinite(kg) ? kg : size} kg
+                </div>
+                <div>
+                  <strong>Sabor:</strong> {flavor}
+                </div>
+                <div>
+                  <strong>Cor da Massa:</strong> {doughColor}
+                </div>
+                <div className="text-lg">
+                  <strong>Preço Total:</strong> {formatBRL(price)}
+                </div>
               </div>
-              
+
               <div className="text-center text-sm text-gray-600 pt-4 border-t">
                 Data do Pedido: {today || '—'}
               </div>
@@ -565,14 +861,14 @@ export default function Home() {
             <div className="p-4 no-print space-y-2">
               <button
                 onClick={handlePrint}
-                className="w-full bg-white border border-gray-300 py-2 px-4 rounded-md hover:bg-gray-50 flex items-center justify-center gap-2 transition-colors"
+                className="w-full bg-white border border-gray-300 py-2.5 px-4 rounded-xl hover:bg-gray-50 flex items-center justify-center gap-2 transition-colors"
               >
                 <Printer className="w-4 h-4" />
                 Imprimir Nota
               </button>
               <button
                 onClick={handleNewOrder}
-                className="w-full bg-pink-600 text-white py-2 px-4 rounded-md hover:bg-pink-700 flex items-center justify-center gap-2 transition-colors"
+                className="w-full bg-pink-600 text-white py-2.5 px-4 rounded-xl hover:bg-pink-700 flex items-center justify-center gap-2 transition-colors shadow"
               >
                 <Plus className="w-4 h-4" />
                 Novo Pedido
