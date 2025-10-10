@@ -26,6 +26,11 @@ interface Client {
 
 type StoreName = 'flavors' | 'clients';
 
+type StoreMap = {
+  flavors: Flavor;
+  clients: Client;
+};
+
 const defaultFlavors: Flavor[] = [
   { name: 'Chocolate', pricePerKg: 50 },
   { name: 'Baunilha', pricePerKg: 45 },
@@ -54,16 +59,15 @@ const hasIndexedDB = isBrowser && typeof window.indexedDB !== 'undefined';
 /* =========================
    IndexedDB Helper (com fallback)
    ========================= */
-// Usamos any para evitar dependência de tipos DOM em builds TS sem "dom" na lib.
-let dbPromise: Promise<any> | null = null;
+let dbPromise: Promise<IDBDatabase> | null = null;
 
-function getDB(): Promise<any> {
+async function getDB(): Promise<IDBDatabase> {
   if (!hasIndexedDB) {
-    return Promise.reject(new Error('IndexedDB não suportado neste ambiente.'));
+    throw new Error('IndexedDB não suportado neste ambiente.');
   }
   if (dbPromise) return dbPromise;
 
-  dbPromise = new Promise((resolve, reject) => {
+  dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = window.indexedDB.open('cakeDB', 1);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -79,54 +83,60 @@ function getDB(): Promise<any> {
       db.onversionchange = () => db.close();
       resolve(db);
     };
-    request.onerror = () => reject(request.error);
+    request.onerror = () => reject(request.error ?? new Error('Falha ao abrir IndexedDB.'));
   });
 
   return dbPromise;
 }
 
-async function idbGetAll<T = any>(storeName: StoreName): Promise<T[]> {
+async function idbGetAll<K extends StoreName>(storeName: K): Promise<StoreMap[K][]> {
   const db = await getDB();
-  return new Promise<T[]>((resolve, reject) => {
+  return new Promise<StoreMap[K][]>((resolve, reject) => {
     const tx = db.transaction(storeName, 'readonly');
     const store = tx.objectStore(storeName);
     const req = store.getAll();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const result = (req.result ?? []) as StoreMap[K][];
+      resolve(result);
+    };
+    req.onerror = () => reject(req.error ?? new Error('Falha ao ler IndexedDB.'));
   });
 }
 
-async function idbPut<T = any>(storeName: StoreName, value: T): Promise<void> {
+async function idbPut<K extends StoreName>(storeName: K, value: StoreMap[K]): Promise<void> {
   const db = await getDB();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).put(value as any);
+    tx.objectStore(storeName).put(value);
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('Falha ao escrever no IndexedDB.'));
+    tx.onabort = () => reject(tx.error ?? new Error('Transação abortada no IndexedDB.'));
   });
 }
 
-async function idbBulkPut<T = any>(storeName: StoreName, values: T[]): Promise<void> {
+async function idbBulkPut<K extends StoreName>(
+  storeName: K,
+  values: StoreMap[K][]
+): Promise<void> {
   const db = await getDB();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
-    for (const v of values) store.put(v as any);
+    for (const v of values) store.put(v);
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('Falha no bulkPut do IndexedDB.'));
+    tx.onabort = () => reject(tx.error ?? new Error('Transação abortada no bulkPut.'));
   });
 }
 
-async function idbDelete(storeName: StoreName, key: any): Promise<void> {
+async function idbDelete<K extends StoreName>(storeName: K, key: string): Promise<void> {
   const db = await getDB();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     tx.objectStore(storeName).delete(key);
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('Falha ao remover do IndexedDB.'));
+    tx.onabort = () => reject(tx.error ?? new Error('Transação abortada no delete.'));
   });
 }
 
@@ -136,40 +146,56 @@ const lsKeys: Record<StoreName, string> = {
   clients: 'cakeClients',
 };
 
-const storage = {
-  async getAll<T = any>(this: any, store: StoreName): Promise<T[]> {
-    if (hasIndexedDB) return idbGetAll<T>(store);
-    if (!isBrowser) return []; // SSR: não há window/localStorage
-    const raw = window.localStorage.getItem(lsKeys[store]);
-    if (!raw) return [];
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
+function getKeyValue<K extends StoreName>(store: K, item: StoreMap[K]): string {
+  return store === 'flavors' ? (item as Flavor).name : (item as Client).id;
+}
+
+function readFromLocalStorage<K extends StoreName>(store: K): StoreMap[K][] {
+  if (!isBrowser) return [];
+  const raw = window.localStorage.getItem(lsKeys[store]);
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed as StoreMap[K][];
     }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+interface StorageAdapter {
+  getAll<K extends StoreName>(store: K): Promise<StoreMap[K][]>;
+  bulkPut<K extends StoreName>(store: K, values: StoreMap[K][]): Promise<void>;
+  put<K extends StoreName>(store: K, value: StoreMap[K]): Promise<void>;
+  delete<K extends StoreName>(store: K, key: string): Promise<void>;
+}
+
+const storage: StorageAdapter = {
+  async getAll(store) {
+    if (hasIndexedDB) return idbGetAll(store);
+    return readFromLocalStorage(store);
   },
-  async bulkPut<T = any>(this: any, store: StoreName, values: T[]) {
-    if (hasIndexedDB) return idbBulkPut<T>(store, values);
+  async bulkPut(store, values) {
+    if (hasIndexedDB) return idbBulkPut(store, values);
     if (!isBrowser) return;
     window.localStorage.setItem(lsKeys[store], JSON.stringify(values));
   },
-  async put<T = any>(this: any, store: StoreName, value: T) {
-    if (hasIndexedDB) return idbPut<T>(store, value);
+  async put(store, value) {
+    if (hasIndexedDB) return idbPut(store, value);
     if (!isBrowser) return;
-    const keyProp = store === 'flavors' ? 'name' : 'id';
-    const current = await this.getAll<any>(store);
-    const idx = current.findIndex((x: any) => x[keyProp] === (value as any)[keyProp]);
+    const current = readFromLocalStorage(store);
+    const idx = current.findIndex((x) => getKeyValue(store, x) === getKeyValue(store, value));
     if (idx >= 0) current[idx] = value;
     else current.push(value);
     window.localStorage.setItem(lsKeys[store], JSON.stringify(current));
   },
-  async delete(this: any, store: StoreName, key: string) {
+  async delete(store, key) {
     if (hasIndexedDB) return idbDelete(store, key);
     if (!isBrowser) return;
-    const keyProp = store === 'flavors' ? 'name' : 'id';
-    const current = await this.getAll<any>(store);
-    const next = current.filter((x: any) => x[keyProp] !== key);
+    const current = readFromLocalStorage(store);
+    const next = current.filter((x) => getKeyValue(store, x) !== key);
     window.localStorage.setItem(lsKeys[store], JSON.stringify(next));
   },
 };
@@ -229,7 +255,8 @@ export default function Home() {
     async function init() {
       try {
         // Carrega sabores
-        let storedFlavors = await storage.getAll<Flavor>('flavors');
+        let storedFlavors = await storage.getAll('flavors');
+
         // Migra do localStorage para IDB, se necessário
         if (hasIndexedDB && storedFlavors.length === 0) {
           const localRaw = window.localStorage.getItem(lsKeys.flavors);
@@ -237,8 +264,8 @@ export default function Home() {
             try {
               const parsed = JSON.parse(localRaw);
               if (Array.isArray(parsed) && parsed.length > 0) {
-                await storage.bulkPut('flavors', parsed);
-                storedFlavors = parsed;
+                await storage.bulkPut('flavors', parsed as Flavor[]);
+                storedFlavors = parsed as Flavor[];
               }
               window.localStorage.removeItem(lsKeys.flavors);
             } catch {
@@ -253,15 +280,15 @@ export default function Home() {
         if (!ignore) setFlavors(storedFlavors);
 
         // Carrega clientes
-        let storedClients = await storage.getAll<Client>('clients');
+        let storedClients = await storage.getAll('clients');
         if (hasIndexedDB && storedClients.length === 0) {
           const localRaw = window.localStorage.getItem(lsKeys.clients);
           if (localRaw) {
             try {
               const parsed = JSON.parse(localRaw);
               if (Array.isArray(parsed) && parsed.length > 0) {
-                await storage.bulkPut('clients', parsed);
-                storedClients = parsed;
+                await storage.bulkPut('clients', parsed as Client[]);
+                storedClients = parsed as Client[];
               }
               window.localStorage.removeItem(lsKeys.clients);
             } catch {
@@ -271,6 +298,7 @@ export default function Home() {
         }
         if (!ignore) setClients(storedClients);
       } catch (err) {
+        // eslint-disable-next-line no-console
         console.error('Falha ao inicializar dados', err);
         if (!ignore) setMessage({ type: 'error', text: 'Falha ao carregar dados locais.' });
       } finally {
@@ -329,7 +357,7 @@ export default function Home() {
 
     try {
       setSaving(true);
-      await storage.put<Flavor>('flavors', { name, pricePerKg: parsedPrice });
+      await storage.put('flavors', { name, pricePerKg: parsedPrice });
 
       setFlavors((prev) => {
         const exists = prev.some((f) => f.name.toLowerCase() === name.toLowerCase());
@@ -347,6 +375,7 @@ export default function Home() {
       setNewFlavorPrice('');
       setMessage({ type: 'success', text: 'Sabor salvo com sucesso.' });
     } catch (err) {
+      // eslint-disable-next-line no-console
       console.error(err);
       setMessage({ type: 'error', text: 'Não foi possível salvar o sabor.' });
     } finally {
@@ -362,6 +391,7 @@ export default function Home() {
       if (flavor === flavorName) setFlavor('');
       setMessage({ type: 'success', text: 'Sabor removido.' });
     } catch (err) {
+      // eslint-disable-next-line no-console
       console.error(err);
       setMessage({ type: 'error', text: 'Não foi possível remover o sabor.' });
     } finally {
@@ -378,11 +408,12 @@ export default function Home() {
 
     try {
       setSaving(true);
-      await storage.put<Client>('clients', newClient);
+      await storage.put('clients', newClient);
       setClients((prev) => [...prev, newClient]);
       setSelectedClientId(newClient.id);
       setMessage({ type: 'success', text: 'Cliente salvo.' });
     } catch (err) {
+      // eslint-disable-next-line no-console
       console.error(err);
       setMessage({ type: 'error', text: 'Não foi possível salvar o cliente.' });
     } finally {
@@ -402,6 +433,7 @@ export default function Home() {
       }
       setMessage({ type: 'success', text: 'Cliente removido.' });
     } catch (err) {
+      // eslint-disable-next-line no-console
       console.error(err);
       setMessage({ type: 'error', text: 'Não foi possível remover o cliente.' });
     } finally {
