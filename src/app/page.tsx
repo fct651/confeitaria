@@ -46,13 +46,18 @@ const toNumber = (s: string) => {
 };
 
 /* =========================
+   Ambiente/feature detection seguro para SSR
+   ========================= */
+const isBrowser = typeof window !== 'undefined';
+const hasIndexedDB = isBrowser && typeof window.indexedDB !== 'undefined';
+
+/* =========================
    IndexedDB Helper (com fallback)
    ========================= */
-const hasIndexedDB = typeof window !== 'undefined' && 'indexedDB' in window;
+// Usamos any para evitar dependência de tipos DOM em builds TS sem "dom" na lib.
+let dbPromise: Promise<any> | null = null;
 
-let dbPromise: Promise<IDBDatabase> | null = null;
-
-function getDB(): Promise<IDBDatabase> {
+function getDB(): Promise<any> {
   if (!hasIndexedDB) {
     return Promise.reject(new Error('IndexedDB não suportado neste ambiente.'));
   }
@@ -114,7 +119,7 @@ async function idbBulkPut<T = any>(storeName: StoreName, values: T[]): Promise<v
   });
 }
 
-async function idbDelete(storeName: StoreName, key: IDBValidKey): Promise<void> {
+async function idbDelete(storeName: StoreName, key: any): Promise<void> {
   const db = await getDB();
   return new Promise<void>((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
@@ -132,8 +137,9 @@ const lsKeys: Record<StoreName, string> = {
 };
 
 const storage = {
-  async getAll<T = any>(store: StoreName): Promise<T[]> {
+  async getAll<T = any>(this: any, store: StoreName): Promise<T[]> {
     if (hasIndexedDB) return idbGetAll<T>(store);
+    if (!isBrowser) return []; // SSR: não há window/localStorage
     const raw = window.localStorage.getItem(lsKeys[store]);
     if (!raw) return [];
     try {
@@ -143,12 +149,14 @@ const storage = {
       return [];
     }
   },
-  async bulkPut<T = any>(store: StoreName, values: T[]) {
+  async bulkPut<T = any>(this: any, store: StoreName, values: T[]) {
     if (hasIndexedDB) return idbBulkPut<T>(store, values);
+    if (!isBrowser) return;
     window.localStorage.setItem(lsKeys[store], JSON.stringify(values));
   },
-  async put<T = any>(store: StoreName, value: T) {
+  async put<T = any>(this: any, store: StoreName, value: T) {
     if (hasIndexedDB) return idbPut<T>(store, value);
+    if (!isBrowser) return;
     const keyProp = store === 'flavors' ? 'name' : 'id';
     const current = await this.getAll<any>(store);
     const idx = current.findIndex((x: any) => x[keyProp] === (value as any)[keyProp]);
@@ -156,8 +164,9 @@ const storage = {
     else current.push(value);
     window.localStorage.setItem(lsKeys[store], JSON.stringify(current));
   },
-  async delete(store: StoreName, key: string) {
+  async delete(this: any, store: StoreName, key: string) {
     if (hasIndexedDB) return idbDelete(store, key);
+    if (!isBrowser) return;
     const keyProp = store === 'flavors' ? 'name' : 'id';
     const current = await this.getAll<any>(store);
     const next = current.filter((x: any) => x[keyProp] !== key);
@@ -204,7 +213,15 @@ export default function Home() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Auto-dismiss do toast
   useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(() => setMessage(null), 2200);
+    return () => clearTimeout(t);
+  }, [message]);
+
+  useEffect(() => {
+    if (!isBrowser) return;
     setToday(new Date().toLocaleDateString('pt-BR'));
 
     let ignore = false;
@@ -297,19 +314,17 @@ export default function Home() {
   }, [orderType, selectedFlavor, kg, doughColor, clientName, clientPhone, deliveryDate]);
 
   const handleGenerateNote = () => {
-    if (isFormValid) {
-      setShowNote(true);
-    }
+    if (isFormValid) setShowNote(true);
   };
 
   const handlePrint = () => {
+    if (!isBrowser) return;
     window.print();
   };
 
   const handleAddFlavor = async () => {
     const name = newFlavorName.trim();
     const parsedPrice = toNumber(newFlavorPrice);
-
     if (!name || !Number.isFinite(parsedPrice) || parsedPrice <= 0) return;
 
     try {
@@ -344,9 +359,7 @@ export default function Home() {
       setSaving(true);
       await storage.delete('flavors', flavorName);
       setFlavors((prev) => prev.filter((f) => f.name !== flavorName));
-      if (flavor === flavorName) {
-        setFlavor('');
-      }
+      if (flavor === flavorName) setFlavor('');
       setMessage({ type: 'success', text: 'Sabor removido.' });
     } catch (err) {
       console.error(err);
@@ -359,14 +372,9 @@ export default function Home() {
   const handleAddClient = async () => {
     const name = clientName.trim();
     const phone = clientPhone.trim();
-
     if (!name || !phone) return;
 
-    const newClient: Client = {
-      id: Date.now().toString(),
-      name,
-      phone,
-    };
+    const newClient: Client = { id: Date.now().toString(), name, phone };
 
     try {
       setSaving(true);
@@ -420,21 +428,15 @@ export default function Home() {
         dangerouslySetInnerHTML={{
           __html: `
         @media print {
-          body * {
-            visibility: hidden;
-          }
-          .print-content, .print-content * {
-            visibility: visible;
-          }
+          body * { visibility: hidden; }
+          .print-content, .print-content * { visibility: visible; }
           .print-content {
             position: absolute;
             left: 0;
             top: 0;
             width: 100%;
           }
-          .no-print {
-            display: none !important;
-          }
+          .no-print { display: none !important; }
         }
       `,
         }}
@@ -446,14 +448,8 @@ export default function Home() {
           role="status"
           aria-live="polite"
           className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl shadow-lg text-sm ${
-            message.type === 'success'
-              ? 'bg-emerald-600 text-white'
-              : 'bg-rose-600 text-white'
+            message.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
           }`}
-          onAnimationEnd={() => {
-            // auto-close
-            setTimeout(() => setMessage(null), 2200);
-          }}
         >
           {message.text}
         </div>
