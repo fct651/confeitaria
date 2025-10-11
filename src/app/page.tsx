@@ -12,6 +12,7 @@ import {
   User,
   Calendar,
 } from 'lucide-react';
+import Link from 'next/link';
 
 interface Flavor {
   name: string;
@@ -24,11 +25,29 @@ interface Client {
   phone: string;
 }
 
-type StoreName = 'flavors' | 'clients';
+type OrderStatus = 'pending' | 'confirmed' | 'delivered' | 'canceled';
+
+interface Order {
+  id: string;
+  type: 'ready' | 'custom';
+  sizeKg: number;
+  flavorName: string;
+  doughColor: string;
+  price: number;
+  clientId?: string;
+  clientName?: string;
+  clientPhone?: string;
+  deliveryDate?: string; // YYYY-MM-DD
+  status: OrderStatus;
+  createdAt: string; // ISO
+}
+
+type StoreName = 'flavors' | 'clients' | 'orders';
 
 type StoreMap = {
   flavors: Flavor;
   clients: Client;
+  orders: Order;
 };
 
 const defaultFlavors: Flavor[] = [
@@ -55,6 +74,7 @@ const toNumber = (s: string) => {
    ========================= */
 const isBrowser = typeof window !== 'undefined';
 const hasIndexedDB = isBrowser && typeof window.indexedDB !== 'undefined';
+const DB_VERSION = 3;
 
 /* =========================
    IndexedDB Helper (com fallback)
@@ -68,7 +88,7 @@ async function getDB(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
 
   dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = window.indexedDB.open('cakeDB', 1);
+    const request = window.indexedDB.open('cakeDB', DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains('flavors')) {
@@ -76,6 +96,15 @@ async function getDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains('clients')) {
         db.createObjectStore('clients', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('orders')) {
+        const os = db.createObjectStore('orders', { keyPath: 'id' });
+        try {
+          os.createIndex('deliveryDate', 'deliveryDate', { unique: false });
+          os.createIndex('status', 'status', { unique: false });
+        } catch {
+          // ignore
+        }
       }
     };
     request.onsuccess = () => {
@@ -92,14 +121,18 @@ async function getDB(): Promise<IDBDatabase> {
 async function idbGetAll<K extends StoreName>(storeName: K): Promise<StoreMap[K][]> {
   const db = await getDB();
   return new Promise<StoreMap[K][]>((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const store = tx.objectStore(storeName);
-    const req = store.getAll();
-    req.onsuccess = () => {
-      const result = (req.result ?? []) as StoreMap[K][];
-      resolve(result);
-    };
-    req.onerror = () => reject(req.error ?? new Error('Falha ao ler IndexedDB.'));
+    try {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.getAll();
+      req.onsuccess = () => {
+        const result = (req.result ?? []) as StoreMap[K][];
+        resolve(result);
+      };
+      req.onerror = () => reject(req.error ?? new Error('Falha ao ler IndexedDB.'));
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error('Falha no acesso ao ObjectStore.'));
+    }
   });
 }
 
@@ -144,10 +177,13 @@ async function idbDelete<K extends StoreName>(storeName: K, key: string): Promis
 const lsKeys: Record<StoreName, string> = {
   flavors: 'cakeFlavors',
   clients: 'cakeClients',
+  orders: 'cakeOrders',
 };
 
 function getKeyValue<K extends StoreName>(store: K, item: StoreMap[K]): string {
-  return store === 'flavors' ? (item as Flavor).name : (item as Client).id;
+  if (store === 'flavors') return (item as Flavor).name;
+  if (store === 'clients') return (item as Client).id;
+  return (item as Order).id;
 }
 
 function readFromLocalStorage<K extends StoreName>(store: K): StoreMap[K][] {
@@ -219,6 +255,7 @@ export default function Home() {
   const [doughColor, setDoughColor] = useState('');
   const [flavors, setFlavors] = useState<Flavor[]>([]);
   const [showNote, setShowNote] = useState(false);
+  const [currentOrderId, setCurrentOrderId] = useState<string | null>(null);
 
   // Estados do cliente
   const [clients, setClients] = useState<Client[]>([]);
@@ -341,8 +378,50 @@ export default function Home() {
     return basicValid && clientName.trim() && clientPhone.trim() && deliveryDate;
   }, [orderType, selectedFlavor, kg, doughColor, clientName, clientPhone, deliveryDate]);
 
-  const handleGenerateNote = () => {
-    if (isFormValid) setShowNote(true);
+  async function saveOrder(): Promise<Order> {
+    const id = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const order: Order = {
+      id,
+      type: orderType,
+      sizeKg: Number(kg),
+      flavorName: flavor,
+      doughColor,
+      price,
+      clientId: selectedClientId || undefined,
+      clientName: clientName || undefined,
+      clientPhone: clientPhone || undefined,
+      deliveryDate: orderType === 'custom' ? deliveryDate : undefined,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    await storage.put('orders', order);
+    try {
+      if (isBrowser && 'BroadcastChannel' in window) {
+        const bc = new BroadcastChannel('cake_sync');
+        bc.postMessage({ type: 'orders_changed', id: order.id });
+        bc.close();
+      }
+    } catch {
+      // ignore
+    }
+    return order;
+  }
+
+  const handleGenerateNote = async () => {
+    if (!isFormValid) return;
+    try {
+      setSaving(true);
+      const order = await saveOrder();
+      setCurrentOrderId(order.id);
+      setShowNote(true);
+      setMessage({ type: 'success', text: 'Pedido salvo e nota gerada.' });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error(e);
+      setMessage({ type: 'error', text: 'Não foi possível salvar o pedido.' });
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handlePrint = () => {
@@ -443,6 +522,7 @@ export default function Home() {
 
   const handleNewOrder = () => {
     setShowNote(false);
+    setCurrentOrderId(null);
     setSize('');
     setFlavor('');
     setDoughColor('');
@@ -499,7 +579,18 @@ export default function Home() {
           <h1 className="mt-3 text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-600 to-fuchsia-600 flex items-center justify-center gap-2">
             Pronta Entrega
           </h1>
-          <p className="text-gray-600 mt-2">Crie e imprima notas rapidamente</p>
+          <p className="text-gray-600 mt-2">
+            Crie e imprima notas rapidamente
+          </p>
+          <div className="mt-3">
+            <Link
+              href="/entregas"
+              className="inline-flex items-center gap-2 text-sm px-3 py-2 rounded-xl bg-white border border-pink-200 shadow-sm hover:bg-pink-50 transition"
+            >
+              <Calendar className="w-4 h-4 text-pink-600" />
+              Ver Entregas
+            </Link>
+          </div>
         </div>
 
         {/* Card principal */}
@@ -695,7 +786,7 @@ export default function Home() {
 
                 <button
                   onClick={handleGenerateNote}
-                  disabled={!isFormValid}
+                  disabled={!isFormValid || saving}
                   className="w-full bg-pink-600 text-white py-2.5 px-4 rounded-xl hover:bg-pink-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors shadow"
                 >
                   Gerar Nota
@@ -846,7 +937,7 @@ export default function Home() {
           <div className="bg-white rounded-2xl shadow-lg ring-1 ring-gray-100 overflow-hidden">
             <div className="p-6 border-b text-center bg-gradient-to-r from-pink-50 to-rose-50">
               <h2 className="text-3xl font-bold text-pink-900">
-                {orderType === 'ready' ? 'Pronta Entrega' : clientName}
+                {orderType === 'ready' ? 'Pronta Entrega' : clientName || 'Encomenda'}
               </h2>
               <p className="text-gray-600 mt-1">Nota de Pedido</p>
             </div>
@@ -862,7 +953,9 @@ export default function Home() {
                   <div className="flex items-center gap-2">
                     <Calendar className="w-4 h-4" />
                     <strong>Data de Entrega:</strong>{' '}
-                    {new Date(deliveryDate + 'T00:00:00').toLocaleDateString('pt-BR')}
+                    {deliveryDate
+                      ? new Date(deliveryDate + 'T00:00:00').toLocaleDateString('pt-BR')
+                      : '—'}
                   </div>
                 </div>
               )}
@@ -884,6 +977,7 @@ export default function Home() {
 
               <div className="text-center text-sm text-gray-600 pt-4 border-t">
                 Data do Pedido: {today || '—'}
+                {currentOrderId ? ` • Pedido #${currentOrderId}` : ''}
               </div>
             </div>
             <div className="p-4 no-print space-y-2">
