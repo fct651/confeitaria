@@ -25,7 +25,7 @@ interface Order {
 /* ========= Ambiente ========= */
 const isBrowser = typeof window !== 'undefined';
 const hasIndexedDB = isBrowser && typeof window.indexedDB !== 'undefined';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 /* ========= IndexedDB + fallback ========= */
 type StoreName = 'orders';
@@ -36,10 +36,19 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 async function getDB(): Promise<IDBDatabase> {
   if (!hasIndexedDB) throw new Error('IndexedDB não suportado');
   if (dbPromise) return dbPromise;
+
   dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = window.indexedDB.open('cakeDB', DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
+
+      // Garanta que todos os stores existam nesta versão
+      if (!db.objectStoreNames.contains('flavors')) {
+        db.createObjectStore('flavors', { keyPath: 'name' });
+      }
+      if (!db.objectStoreNames.contains('clients')) {
+        db.createObjectStore('clients', { keyPath: 'id' });
+      }
       if (!db.objectStoreNames.contains('orders')) {
         const os = db.createObjectStore('orders', { keyPath: 'id' });
         try {
@@ -49,7 +58,6 @@ async function getDB(): Promise<IDBDatabase> {
           // ignore
         }
       }
-      // stores antigas podem existir em outra página; aqui criamos só o necessário
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -58,17 +66,22 @@ async function getDB(): Promise<IDBDatabase> {
     };
     request.onerror = () => reject(request.error ?? new Error('Falha ao abrir IndexedDB'));
   });
+
   return dbPromise;
 }
 
 async function idbGetAll<K extends StoreName>(storeName: K): Promise<StoreMap[K][]> {
   const db = await getDB();
   return new Promise<StoreMap[K][]>((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const store = tx.objectStore(storeName);
-    const req = store.getAll();
-    req.onsuccess = () => resolve((req.result ?? []) as StoreMap[K][]);
-    req.onerror = () => reject(req.error ?? new Error('Falha ao ler IndexedDB'));
+    try {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.getAll();
+      req.onsuccess = () => resolve((req.result ?? []) as StoreMap[K][]);
+      req.onerror = () => reject(req.error ?? new Error('Falha ao ler IndexedDB'));
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error('Falha no acesso ao ObjectStore.'));
+    }
   });
 }
 
@@ -366,7 +379,7 @@ export default function DeliveriesDashboard() {
     if (!confirm('Remover este pedido?')) return;
     try {
       setSaving(true);
-      await storageDelete('orders', id);
+      await idbDelete('orders', id);
       setOrders((prev) => prev.filter((x) => x.id !== id));
       setMessage({ type: 'success', text: 'Pedido removido.' });
     } catch (e) {
