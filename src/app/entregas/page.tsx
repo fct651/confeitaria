@@ -20,6 +20,7 @@ interface Order {
   deliveryDate?: string; // YYYY-MM-DD
   status: OrderStatus;
   createdAt: string; // ISO
+  notes?: string; // Observações
 }
 
 /* ========= Ambiente ========= */
@@ -379,7 +380,7 @@ export default function DeliveriesDashboard() {
     if (!confirm('Remover este pedido?')) return;
     try {
       setSaving(true);
-      await idbDelete('orders', id);
+      await storageDelete('orders', id); // usa storageDelete para cobrir fallback localStorage
       setOrders((prev) => prev.filter((x) => x.id !== id));
       setMessage({ type: 'success', text: 'Pedido removido.' });
     } catch (e) {
@@ -606,6 +607,12 @@ export default function DeliveriesDashboard() {
                         ) : null}
                       </div>
                     )}
+
+                    {o.notes?.trim() ? (
+                      <div className="text-sm text-indigo-900/80 italic border-l-2 border-indigo-100 pl-2 whitespace-pre-wrap">
+                        <strong>Observações:</strong> {o.notes}
+                      </div>
+                    ) : null}
 
                     <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                       <div className="flex items-center gap-2">

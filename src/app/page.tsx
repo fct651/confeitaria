@@ -40,6 +40,7 @@ interface Order {
   deliveryDate?: string; // YYYY-MM-DD
   status: OrderStatus;
   createdAt: string; // ISO
+  notes?: string; // Observações
 }
 
 type StoreName = 'flavors' | 'clients' | 'orders';
@@ -256,6 +257,7 @@ export default function Home() {
   const [flavors, setFlavors] = useState<Flavor[]>([]);
   const [showNote, setShowNote] = useState(false);
   const [currentOrderId, setCurrentOrderId] = useState<string | null>(null);
+  const [notes, setNotes] = useState(''); // Observações
 
   // Estados do cliente
   const [clients, setClients] = useState<Client[]>([]);
@@ -380,6 +382,7 @@ export default function Home() {
 
   async function saveOrder(): Promise<Order> {
     const id = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const notesValue = notes?.trim() || undefined;
     const order: Order = {
       id,
       type: orderType,
@@ -393,6 +396,7 @@ export default function Home() {
       deliveryDate: orderType === 'custom' ? deliveryDate : undefined,
       status: 'pending',
       createdAt: new Date().toISOString(),
+      notes: notesValue,
     };
     await storage.put('orders', order);
     try {
@@ -531,6 +535,7 @@ export default function Home() {
     setClientName('');
     setClientPhone('');
     setDeliveryDate('');
+    setNotes('');
     setMessage({ type: 'success', text: 'Pronto para um novo pedido.' });
   };
 
@@ -775,6 +780,21 @@ export default function Home() {
                   </select>
                 </div>
 
+                {/* Observações */}
+                <div>
+                  <label htmlFor="notes" className="block text-sm font-medium mb-1">
+                    Observações
+                  </label>
+                  <textarea
+                    id="notes"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    rows={3}
+                    placeholder="Ex: sem lactose, com morangos, entregar na portaria... (opcional)"
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-pink-500"
+                  />
+                </div>
+
                 {price > 0 && (
                   <div className="flex items-center gap-2 p-3 bg-green-50 rounded-2xl border border-green-200 ring-1 ring-green-100">
                     <DollarSign className="w-5 h-5 text-green-600" />
@@ -970,6 +990,11 @@ export default function Home() {
                 <div>
                   <strong>Cor da Massa:</strong> {doughColor}
                 </div>
+                {notes?.trim() ? (
+                  <div className="whitespace-pre-wrap">
+                    <strong>Observações:</strong> {notes}
+                  </div>
+                ) : null}
                 <div className="text-lg">
                   <strong>Preço Total:</strong> {formatBRL(price)}
                 </div>

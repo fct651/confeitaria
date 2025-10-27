@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Projetokelly",
+  "version": "0.1.0",
+  "identifier": "com.kelly.app",
+  "build": {
+    "frontendDist": "../out",
+    "devUrl": "http://localhost:3000"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Projetokelly",
+        "width": 1200,
+        "height": 800
+      }
+    ]
+  },
+  "bundle": {
+  "active": true,
+  "targets": ["nsis"],
+  "icon": ["icons/icon.ico"],
+  "windows": {
+    "certificateThumbprint": null,
+    "digestAlgorithm": "sha256",
+    "timestampUrl": "http://timestamp.digicert.com"
+  }
+}
+
+}
