@@ -41,6 +41,9 @@ interface Order {
   status: OrderStatus;
   createdAt: string; // ISO
   notes?: string; // Observações
+  // Campos adicionados para bolo decorado
+  decorated?: boolean;
+  decoratedSurcharge?: number; // valor adicional aplicado no momento da venda
 }
 
 type StoreName = 'flavors' | 'clients' | 'orders';
@@ -50,6 +53,9 @@ type StoreMap = {
   clients: Client;
   orders: Order;
 };
+
+// Ajuste este valor futuramente, se necessário
+const DECORATED_SURCHARGE = 60; // R$ 60,00 de adicional para bolo decorado
 
 const defaultFlavors: Flavor[] = [
   { name: 'Chocolate', pricePerKg: 50 },
@@ -254,6 +260,7 @@ export default function Home() {
   const [size, setSize] = useState('');
   const [flavor, setFlavor] = useState('');
   const [doughColor, setDoughColor] = useState('');
+  const [decorated, setDecorated] = useState(false); // Bolo decorado
   const [flavors, setFlavors] = useState<Flavor[]>([]);
   const [showNote, setShowNote] = useState(false);
   const [currentOrderId, setCurrentOrderId] = useState<string | null>(null);
@@ -369,10 +376,17 @@ export default function Home() {
 
   const kg = useMemo(() => toNumber(size), [size]);
 
-  const price = useMemo(() => {
+  const basePrice = useMemo(() => {
     if (!selectedFlavor || !Number.isFinite(kg) || kg <= 0) return 0;
     return kg * selectedFlavor.pricePerKg;
   }, [kg, selectedFlavor]);
+
+  const decoratedExtra = useMemo(
+    () => (decorated ? DECORATED_SURCHARGE : 0),
+    [decorated]
+  );
+
+  const price = useMemo(() => basePrice + decoratedExtra, [basePrice, decoratedExtra]);
 
   const isFormValid = useMemo(() => {
     const basicValid = Boolean(selectedFlavor && Number.isFinite(kg) && kg > 0 && doughColor);
@@ -397,6 +411,8 @@ export default function Home() {
       status: 'pending',
       createdAt: new Date().toISOString(),
       notes: notesValue,
+      decorated: decorated || undefined,
+      decoratedSurcharge: decorated ? DECORATED_SURCHARGE : undefined,
     };
     await storage.put('orders', order);
     try {
@@ -509,12 +525,6 @@ export default function Home() {
       setSaving(true);
       await storage.delete('clients', clientId);
       setClients((prev) => prev.filter((c) => c.id !== clientId));
-      if (selectedClientId === clientId) {
-        setSelectedClientId('');
-        setClientName('');
-        setClientPhone('');
-      }
-      setMessage({ type: 'success', text: 'Cliente removido.' });
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(err);
@@ -530,6 +540,7 @@ export default function Home() {
     setSize('');
     setFlavor('');
     setDoughColor('');
+    setDecorated(false);
     setOrderType('ready');
     setSelectedClientId('');
     setClientName('');
@@ -780,6 +791,21 @@ export default function Home() {
                   </select>
                 </div>
 
+                {/* Bolo decorado */}
+                <div className="flex items-center gap-2">
+                  <input
+                    id="decorated"
+                    type="checkbox"
+                    checked={decorated}
+                    onChange={(e) => setDecorated(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300 text-pink-600 focus:ring-pink-500"
+                  />
+                  <label htmlFor="decorated" className="text-sm text-gray-800">
+                    Bolo decorado
+                    <span className="text-gray-500"> (+ {formatBRL(DECORATED_SURCHARGE)})</span>
+                  </label>
+                </div>
+
                 {/* Observações */}
                 <div>
                   <label htmlFor="notes" className="block text-sm font-medium mb-1">
@@ -795,12 +821,19 @@ export default function Home() {
                   />
                 </div>
 
-                {price > 0 && (
-                  <div className="flex items-center gap-2 p-3 bg-green-50 rounded-2xl border border-green-200 ring-1 ring-green-100">
-                    <DollarSign className="w-5 h-5 text-green-600" />
-                    <span className="font-semibold text-green-800">
-                      Preço Total: {formatBRL(price)}
-                    </span>
+                {basePrice > 0 && (
+                  <div className="p-3 bg-green-50 rounded-2xl border border-green-200 ring-1 ring-green-100">
+                    <div className="flex items-center gap-2">
+                      <DollarSign className="w-5 h-5 text-green-600" />
+                      <span className="font-semibold text-green-800">
+                        Preço Total: {formatBRL(price)}
+                      </span>
+                    </div>
+                    {decorated && (
+                      <div className="mt-1 text-xs text-green-800/80">
+                        Inclui decoração: {formatBRL(decoratedExtra)}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -990,6 +1023,11 @@ export default function Home() {
                 <div>
                   <strong>Cor da Massa:</strong> {doughColor}
                 </div>
+                {decorated ? (
+                  <div>
+                    <strong>Decorado:</strong> Sim (+ {formatBRL(DECORATED_SURCHARGE)})
+                  </div>
+                ) : null}
                 {notes?.trim() ? (
                   <div className="whitespace-pre-wrap">
                     <strong>Observações:</strong> {notes}
