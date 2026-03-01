@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import QRCode from 'qrcode';
+import pako from 'pako';
 import {
   Calendar,
   ChevronLeft,
@@ -206,6 +207,46 @@ function statusBadgeColor(s: OrderStatus) {
   }
 }
 
+/* ========= Compressão ========= */
+/**
+ * Serializa e comprime um array de pedidos com pako (deflate).
+ * Retorna uma string base64 pronta para uso em URL.
+ */
+function compressOrders(orders: Order[]): string {
+  const json = JSON.stringify(orders);
+  const compressed = pako.deflate(json);
+  // Converte Uint8Array → string binária → base64
+  let binary = '';
+  const chunkSize = 8192; // evita stack overflow em arrays grandes
+  for (let i = 0; i < compressed.length; i += chunkSize) {
+    binary += String.fromCharCode(...compressed.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Descomprime um payload gerado por compressOrders.
+ * Tem fallback para o formato legado (sem compressão) para retrocompatibilidade.
+ */
+function decompressOrders(b64: string): Order[] {
+  const binary = atob(b64);
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+
+  let json: string;
+  try {
+    // Tenta descomprimir (formato novo com pako)
+    const decompressed = pako.inflate(bytes);
+    json = new TextDecoder().decode(decompressed);
+  } catch {
+    // Fallback: formato legado sem compressão
+    json = decodeURIComponent(escape(atob(b64)));
+  }
+
+  const parsed = JSON.parse(json);
+  if (!Array.isArray(parsed)) throw new Error('Payload inválido');
+  return parsed as Order[];
+}
+
 /* ========= WhatsApp ========= */
 function buildWhatsAppLink(order: Order): string {
   const name = order.clientName || 'cliente';
@@ -222,7 +263,7 @@ function buildWhatsAppLink(order: Order): string {
   return `${base}?text=${encodeURIComponent(msg)}`;
 }
 
-/* ========= Confirm Dialog simples ========= */
+/* ========= Confirm Dialog ========= */
 function ConfirmDialog({
   open,
   onConfirm,
@@ -258,6 +299,163 @@ function ConfirmDialog({
   );
 }
 
+/* ========= OrderCard (fora do componente pai para evitar re-criação) ========= */
+interface OrderCardProps {
+  o: Order;
+  showDateEdit?: boolean;
+  todayStr: string;
+  tomorrowStr: string;
+  saving: boolean;
+  onUpdateStatus: (id: string, status: OrderStatus) => void;
+  onUpdateDate: (id: string, date: string) => void;
+  onDelete: (id: string) => void;
+}
+
+function OrderCard({
+  o,
+  showDateEdit = false,
+  todayStr,
+  tomorrowStr,
+  saving,
+  onUpdateStatus,
+  onUpdateDate,
+  onDelete,
+}: OrderCardProps) {
+  const isOverdue =
+    o.deliveryDate && o.deliveryDate < todayStr && o.status !== 'delivered' && o.status !== 'canceled';
+  const isToday = o.deliveryDate === todayStr;
+  const isTomorrow = o.deliveryDate === tomorrowStr;
+
+  return (
+    <div
+      className={cx(
+        'border rounded-2xl p-4 bg-white flex flex-col gap-3 transition-all',
+        o.status === 'delivered' ? 'opacity-60 border-gray-200' : 'border-pink-100 shadow-sm',
+        isOverdue && 'border-rose-300 bg-rose-50/30'
+      )}
+    >
+      {/* Cabeçalho */}
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            onClick={() => onUpdateStatus(o.id, o.status === 'delivered' ? 'confirmed' : 'delivered')}
+            disabled={saving}
+            aria-label={o.status === 'delivered' ? 'Desmarcar entrega' : 'Marcar como entregue'}
+            className="flex-shrink-0"
+          >
+            {o.status === 'delivered' ? (
+              <CheckCircle className="w-6 h-6 text-emerald-500" />
+            ) : (
+              <Circle className="w-6 h-6 text-gray-300 hover:text-emerald-400 transition-colors" />
+            )}
+          </button>
+
+          <div className="min-w-0">
+            <div className={cx('font-semibold text-gray-900 truncate', o.status === 'delivered' && 'line-through text-gray-400')}>
+              {o.type === 'custom' ? (o.clientName || 'Cliente') : 'Pronta Entrega'}
+            </div>
+            {o.deliveryDate && (
+              <div className={cx(
+                'text-xs mt-0.5',
+                isOverdue ? 'text-rose-600 font-semibold' :
+                isToday ? 'text-indigo-600 font-semibold' :
+                isTomorrow ? 'text-amber-600 font-medium' :
+                'text-gray-500'
+              )}>
+                {isOverdue && '⚠️ Atrasado · '}
+                {isToday && '📦 Hoje · '}
+                {isTomorrow && '⏰ Amanhã · '}
+                {new Date(o.deliveryDate + 'T00:00:00').toLocaleDateString('pt-BR')}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <span className={cx('text-[11px] px-2 py-0.5 rounded-full border font-medium flex-shrink-0', statusBadgeColor(o.status))}>
+          {statusOptions.find((s) => s.value === o.status)?.label}
+        </span>
+      </div>
+
+      {/* Detalhes */}
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-gray-700 pl-8">
+        <div><span className="text-gray-400">Sabor</span> {o.flavorName}</div>
+        <div><span className="text-gray-400">Tamanho</span> {o.sizeKg} kg</div>
+        <div><span className="text-gray-400">Cor</span> {o.doughColor}</div>
+        <div><span className="text-gray-400">Valor</span> <strong>{formatBRL(o.price)}</strong></div>
+        {o.decorated && (
+          <div className="col-span-2 text-pink-700 text-xs">🎨 Decorado (+{formatBRL(o.decoratedSurcharge ?? 60)})</div>
+        )}
+      </div>
+
+      {o.clientPhone && (
+        <div className="pl-8 text-sm text-gray-600">
+          <a href={`tel:${o.clientPhone.replace(/\D/g, '')}`} className="hover:text-indigo-600 transition-colors">
+            📞 {o.clientPhone}
+          </a>
+        </div>
+      )}
+
+      {o.notes?.trim() && (
+        <div className="pl-8 text-sm text-gray-600 italic border-l-2 border-pink-200 ml-8 pl-2 whitespace-pre-wrap">
+          {o.notes}
+        </div>
+      )}
+
+      {/* Controles */}
+      <div className="pl-8 flex flex-wrap items-center gap-2">
+        <select
+          value={o.status}
+          onChange={(e) => onUpdateStatus(o.id, e.target.value as OrderStatus)}
+          disabled={saving}
+          className="text-xs px-2 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-700"
+        >
+          {statusOptions.map((s) => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </select>
+
+        {showDateEdit && (
+          <input
+            type="date"
+            value={o.deliveryDate || ''}
+            onChange={(e) => onUpdateDate(o.id, e.target.value)}
+            disabled={saving}
+            className="text-xs px-2 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-700"
+          />
+        )}
+
+        <div className="flex-1" />
+
+        {o.clientPhone && (
+          <a
+            href={buildWhatsAppLink(o)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-medium transition-colors"
+          >
+            <MessageCircle className="w-3.5 h-3.5" />
+            WhatsApp
+          </a>
+        )}
+
+        <button
+          onClick={() => onDelete(o.id)}
+          disabled={saving}
+          className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 text-xs transition-colors"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <div className="pl-8 text-[10px] text-gray-400">
+        Criado em {new Date(o.createdAt).toLocaleString('pt-BR')}
+        {o.type === 'ready' ? ' · Pronta Entrega' : ' · Encomenda'}
+        {` · #${o.id}`}
+      </div>
+    </div>
+  );
+}
+
 /* ========= Aba ========= */
 type Tab = 'calendar' | 'todo';
 
@@ -276,13 +474,15 @@ export default function DeliveriesDashboard() {
   const [showQR, setShowQR] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
+  const [qrCount, setQrCount] = useState(0);
+
+  const todayStr = ymd(todayDate);
+  const tomorrowStr = ymd(new Date(todayDate.getTime() + 86400000));
 
   /* ---- Load ---- */
-useEffect(() => {
-  let ignore = false;
-  let bc: BroadcastChannel | null = null;
-
-  const run = async () => {
+  useEffect(() => {
+    let ignore = false;
+    let bc: BroadcastChannel | null = null;
 
     const load = async () => {
       setLoading(true);
@@ -291,87 +491,81 @@ useEffect(() => {
         if (!ignore) setOrders(all);
       } catch (e) {
         console.error(e);
-        if (!ignore)
-          setMessage({ type: 'error', text: 'Falha ao carregar pedidos.' });
+        if (!ignore) setMessage({ type: 'error', text: 'Falha ao carregar pedidos.' });
       } finally {
         if (!ignore) setLoading(false);
       }
     };
 
-    await load();
+    const init = async () => {
+      await load();
 
-    // Detecta ?import=
-    const params = new URLSearchParams(window.location.search);
-    const importParam = params.get('import');
+      // Detecta ?import= (com suporte ao novo formato comprimido e ao legado)
+      const params = new URLSearchParams(window.location.search);
+      const importParam = params.get('import');
 
-    if (importParam) {
-      try {
-        const json = decodeURIComponent(
-          escape(atob(decodeURIComponent(importParam)))
-        );
+      if (importParam) {
+        try {
+          const imported = decompressOrders(decodeURIComponent(importParam));
 
-        const imported: Order[] = JSON.parse(json);
+          if (imported.length > 0) {
+            const db = await storageGetAll('orders');
+            const merged = [...db];
 
-        if (Array.isArray(imported) && imported.length > 0) {
-          const db = await storageGetAll('orders');
-          const merged = [...db];
+            for (const imp of imported) {
+              const idx = merged.findIndex((o) => o.id === imp.id);
+              if (idx >= 0) merged[idx] = imp;
+              else merged.push(imp);
+            }
 
-          for (const imp of imported) {
-            const idx = merged.findIndex((o) => o.id === imp.id);
-            if (idx >= 0) merged[idx] = imp;
-            else merged.push(imp);
+            await Promise.all(imported.map((o) => storagePut('orders', o)));
+
+            if (!ignore) {
+              setOrders(merged);
+              setMessage({
+                type: 'success',
+                text: `${imported.length} pedido(s) importado(s) com sucesso!`,
+              });
+            }
+
+            window.history.replaceState({}, '', window.location.pathname);
           }
-
-          await Promise.all(
-            imported.map((o) => storagePut('orders', o))
-          );
-
-          if (!ignore) {
-            setOrders(merged);
-            setMessage({
-              type: 'success',
-              text: `${imported.length} pedido(s) importado(s) do computador!`,
-            });
-          }
-
-          window.history.replaceState({}, '', window.location.pathname);
+        } catch (e) {
+          console.error('Falha ao importar QR', e);
+          if (!ignore) setMessage({ type: 'error', text: 'QR Code inválido ou corrompido.' });
         }
-      } catch (e) {
-        console.error('Falha ao importar QR', e);
       }
-    }
 
-    try {
-      if ('BroadcastChannel' in window) {
-        bc = new BroadcastChannel('cake_sync');
-        bc.onmessage = (ev) => {
-          if ((ev as MessageEvent)?.data?.type === 'orders_changed') {
-            load();
-          }
-        };
-      }
-    } catch {}
+      // BroadcastChannel para sync entre abas
+      try {
+        if ('BroadcastChannel' in window) {
+          bc = new BroadcastChannel('cake_sync');
+          bc.onmessage = (ev) => {
+            if ((ev as MessageEvent)?.data?.type === 'orders_changed') load();
+          };
+        }
+      } catch { /* ignore */ }
 
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') load();
+      const onVisibility = () => {
+        if (document.visibilityState === 'visible') load();
+      };
+      document.addEventListener('visibilitychange', onVisibility);
+
+      // Retorna cleanup — mas como init é async, guardamos para o return do useEffect
+      return () => {
+        document.removeEventListener('visibilitychange', onVisibility);
+      };
     };
 
-    document.addEventListener('visibilitychange', onVisibility);
+    let cleanupFn: (() => void) | undefined;
+    init().then((fn) => { cleanupFn = fn; });
 
     return () => {
-      document.removeEventListener('visibilitychange', onVisibility);
-      try {
-        bc?.close();
-      } catch {}
+      ignore = true;
+      bc?.close();
+      cleanupFn?.();
     };
-  };
-
-  run();
-
-  return () => {
-    ignore = true;
-  };
-}, []);
+  }, []);
 
   useEffect(() => {
     if (!message) return;
@@ -390,38 +584,34 @@ useEffect(() => {
     return map;
   }, [orders]);
 
-  // Pedidos de hoje e amanhã para o painel "A fazer"
-  const todayStr = ymd(todayDate);
-  const tomorrowStr = ymd(new Date(todayDate.getTime() + 86400000));
-
-  const todoOrders = useMemo(() => {
-    return orders
-      .filter(
-        (o) =>
-          o.deliveryDate &&
-          o.status !== 'delivered' &&
-          o.status !== 'canceled' &&
-          o.deliveryDate >= todayStr
-      )
-      .sort((a, b) => (a.deliveryDate! > b.deliveryDate! ? 1 : -1));
-  }, [orders, todayStr]);
-
-  const overdueOrders = useMemo(() => {
-    return orders.filter(
-      (o) =>
+  const todoOrders = useMemo(() =>
+    orders
+      .filter((o) =>
         o.deliveryDate &&
-        o.deliveryDate < todayStr &&
         o.status !== 'delivered' &&
-        o.status !== 'canceled'
-    );
-  }, [orders, todayStr]);
+        o.status !== 'canceled' &&
+        o.deliveryDate >= todayStr
+      )
+      .sort((a, b) => (a.deliveryDate! > b.deliveryDate! ? 1 : -1)),
+    [orders, todayStr]
+  );
 
-  // Calendário
+  const overdueOrders = useMemo(() =>
+    orders.filter((o) =>
+      o.deliveryDate &&
+      o.deliveryDate < todayStr &&
+      o.status !== 'delivered' &&
+      o.status !== 'canceled'
+    ),
+    [orders, todayStr]
+  );
+
   const firstDay = useMemo(() => new Date(year, month, 1), [year, month]);
   const daysInMonth = useMemo(() => new Date(year, month + 1, 0).getDate(), [year, month]);
   const leading = useMemo(() => (firstDay.getDay() + 7) % 7, [firstDay]);
-  const cells = useMemo(() => {
-    return Array.from({ length: 42 }, (_, i) => {
+
+  const cells = useMemo(() =>
+    Array.from({ length: 42 }, (_, i) => {
       const dayNum = i - leading + 1;
       const inMonth = dayNum >= 1 && dayNum <= daysInMonth;
       const date = inMonth ? new Date(year, month, dayNum) : null;
@@ -431,8 +621,9 @@ useEffect(() => {
         dateStr: date ? ymd(date) : null,
         inMonth,
       };
-    });
-  }, [year, month, leading, daysInMonth]);
+    }),
+    [year, month, leading, daysInMonth]
+  );
 
   const selectedOrders = useMemo(
     () => orders.filter((o) => o.deliveryDate === selectedDate),
@@ -444,7 +635,6 @@ useEffect(() => {
     [selectedOrders]
   );
 
-  // Resumo do mês
   const monthSummary = useMemo(() => {
     const monthStr = `${year}-${String(month + 1).padStart(2, '0')}`;
     const monthOrders = orders.filter((o) => o.deliveryDate?.startsWith(monthStr));
@@ -520,181 +710,46 @@ useEffect(() => {
     setSelectedDate(ymd(t));
   }
 
-  const weekLabels = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
-
-  /* ---- Card de pedido reutilizável ---- */
-  function OrderCard({ o, showDateEdit = false }: { o: Order; showDateEdit?: boolean }) {
-    const isOverdue =
-      o.deliveryDate && o.deliveryDate < todayStr && o.status !== 'delivered' && o.status !== 'canceled';
-    const isToday2 = o.deliveryDate === todayStr;
-    const isTomorrow = o.deliveryDate === tomorrowStr;
-
-    return (
-      <div
-        className={cx(
-          'border rounded-2xl p-4 bg-white flex flex-col gap-3 transition-all',
-          o.status === 'delivered' ? 'opacity-60 border-gray-200' : 'border-pink-100 shadow-sm',
-          isOverdue && 'border-rose-300 bg-rose-50/30'
-        )}
-      >
-        {/* Cabeçalho */}
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            {/* Checkbox visual para marcar como entregue */}
-            <button
-              onClick={() =>
-                updateStatus(o.id, o.status === 'delivered' ? 'confirmed' : 'delivered')
-              }
-              disabled={saving}
-              aria-label={o.status === 'delivered' ? 'Desmarcar entrega' : 'Marcar como entregue'}
-              className="flex-shrink-0"
-            >
-              {o.status === 'delivered' ? (
-                <CheckCircle className="w-6 h-6 text-emerald-500" />
-              ) : (
-                <Circle className="w-6 h-6 text-gray-300 hover:text-emerald-400 transition-colors" />
-              )}
-            </button>
-
-            <div className="min-w-0">
-              <div
-                className={cx(
-                  'font-semibold text-gray-900 truncate',
-                  o.status === 'delivered' && 'line-through text-gray-400'
-                )}
-              >
-                {o.type === 'custom' ? (o.clientName || 'Cliente') : 'Pronta Entrega'}
-              </div>
-              {o.deliveryDate && (
-                <div
-                  className={cx(
-                    'text-xs mt-0.5',
-                    isOverdue ? 'text-rose-600 font-semibold' :
-                    isToday2 ? 'text-indigo-600 font-semibold' :
-                    isTomorrow ? 'text-amber-600 font-medium' :
-                    'text-gray-500'
-                  )}
-                >
-                  {isOverdue && '⚠️ Atrasado · '}
-                  {isToday2 && '📦 Hoje · '}
-                  {isTomorrow && '⏰ Amanhã · '}
-                  {new Date(o.deliveryDate + 'T00:00:00').toLocaleDateString('pt-BR')}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5 flex-shrink-0">
-            <span
-              className={cx(
-                'text-[11px] px-2 py-0.5 rounded-full border font-medium',
-                statusBadgeColor(o.status)
-              )}
-            >
-              {statusOptions.find((s) => s.value === o.status)?.label}
-            </span>
-          </div>
-        </div>
-
-        {/* Detalhes do bolo */}
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-gray-700 pl-8">
-          <div><span className="text-gray-400">Sabor</span> {o.flavorName}</div>
-          <div><span className="text-gray-400">Tamanho</span> {o.sizeKg} kg</div>
-          <div><span className="text-gray-400">Cor</span> {o.doughColor}</div>
-          <div><span className="text-gray-400">Valor</span> <strong>{formatBRL(o.price)}</strong></div>
-          {o.decorated && (
-            <div className="col-span-2 text-pink-700 text-xs">🎨 Decorado (+{formatBRL(o.decoratedSurcharge ?? 60)})</div>
-          )}
-        </div>
-
-        {/* Telefone */}
-        {o.clientPhone && (
-          <div className="pl-8 text-sm text-gray-600">
-            <a
-              href={`tel:${o.clientPhone.replace(/\D/g, '')}`}
-              className="hover:text-indigo-600 transition-colors"
-            >
-              📞 {o.clientPhone}
-            </a>
-          </div>
-        )}
-
-        {/* Observações */}
-        {o.notes?.trim() && (
-          <div className="pl-8 text-sm text-gray-600 italic border-l-2 border-pink-200 ml-8 pl-2 whitespace-pre-wrap">
-            {o.notes}
-          </div>
-        )}
-
-        {/* Controles */}
-        <div className="pl-8 flex flex-wrap items-center gap-2">
-          <select
-            value={o.status}
-            onChange={(e) => updateStatus(o.id, e.target.value as OrderStatus)}
-            disabled={saving}
-            className="text-xs px-2 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-700"
-          >
-            {statusOptions.map((s) => (
-              <option key={s.value} value={s.value}>{s.label}</option>
-            ))}
-          </select>
-
-          {showDateEdit && (
-            <input
-              type="date"
-              value={o.deliveryDate || ''}
-              onChange={(e) => updateDate(o.id, e.target.value)}
-              disabled={saving}
-              className="text-xs px-2 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-700"
-            />
-          )}
-
-          <div className="flex-1" />
-
-          {/* Botão WhatsApp */}
-          {o.clientPhone && (
-            <a
-              href={buildWhatsAppLink(o)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-medium transition-colors"
-            >
-              <MessageCircle className="w-3.5 h-3.5" />
-              WhatsApp
-            </a>
-          )}
-
-          <button
-            onClick={() => setConfirmDelete(o.id)}
-            disabled={saving}
-            className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-600 hover:bg-rose-100 text-xs transition-colors"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        <div className="pl-8 text-[10px] text-gray-400">
-          Criado em {new Date(o.createdAt).toLocaleString('pt-BR')}
-          {o.type === 'ready' ? ' · Pronta Entrega' : ' · Encomenda'}
-          {` · #${o.id}`}
-        </div>
-      </div>
-    );
-  }
-
   /* ---- QR Code ---- */
   async function handleGenerateQR() {
     setQrLoading(true);
     setShowQR(true);
+    setQrDataUrl(null);
     try {
+      // Filtra apenas pedidos ativos dos próximos 30 dias
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() + 30);
+      const cutoffStr = ymd(cutoff);
+
       const active = orders.filter(
-        (o) => o.status !== 'delivered' && o.status !== 'canceled'
+        (o) =>
+          o.status !== 'delivered' &&
+          o.status !== 'canceled' &&
+          (!o.deliveryDate || o.deliveryDate <= cutoffStr)
       );
-      const payload = JSON.stringify(active);
-      const b64 = btoa(unescape(encodeURIComponent(payload)));
+
+      if (active.length === 0) {
+        setMessage({ type: 'error', text: 'Nenhum pedido ativo para exportar.' });
+        setShowQR(false);
+        return;
+      }
+
+      setQrCount(active.length);
+
+      // Comprime com pako — ~70% menor que o JSON puro
+      const b64 = compressOrders(active);
       const importUrl = `${window.location.origin}/entregas?import=${encodeURIComponent(b64)}`;
 
-      // Gera QR 100% local — nenhum dado sai do navegador
+      // Segurança: avisa se ainda exceder o limite do QR (improvável, mas defensivo)
+      if (b64.length > 2800) {
+        setMessage({
+          type: 'error',
+          text: `Payload ainda muito grande (${active.length} pedidos). Tente reduzir para menos de 100 pedidos ativos simultâneos.`,
+        });
+        setShowQR(false);
+        return;
+      }
+
       const dataUrl = await QRCode.toDataURL(importUrl, {
         width: 280,
         margin: 2,
@@ -710,6 +765,8 @@ useEffect(() => {
     }
   }
 
+  const weekLabels = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
+
   /* ---- Render ---- */
   return (
     <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-fuchsia-50 p-4 sm:p-6">
@@ -719,9 +776,7 @@ useEffect(() => {
           @media print {
             body * { visibility: hidden; }
             .print-area, .print-area * { visibility: visible; }
-            .print-area {
-              position: absolute; left: 0; top: 0; width: 100%; padding: 16px;
-            }
+            .print-area { position: absolute; left: 0; top: 0; width: 100%; padding: 16px; }
             .no-print { display: none !important; }
           }
         `,
@@ -780,7 +835,7 @@ useEffect(() => {
                       Aponte a câmera do celular para este código
                     </p>
                     <p className="text-xs text-gray-500">
-                      Os pedidos pendentes e confirmados serão carregados automaticamente
+                      {qrCount} pedido(s) exportado(s) · dados comprimidos localmente
                     </p>
                   </div>
                   <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-800">
@@ -827,39 +882,13 @@ useEffect(() => {
         {/* Resumo do mês */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 no-print">
           {[
-            {
-              icon: <TrendingUp className="w-4 h-4 text-emerald-600" />,
-              label: 'Faturamento do mês',
-              value: formatBRL(monthSummary.total),
-              bg: 'bg-emerald-50 border-emerald-200',
-            },
-            {
-              icon: <Cake className="w-4 h-4 text-pink-600" />,
-              label: 'Pedidos no mês',
-              value: String(monthSummary.count),
-              bg: 'bg-pink-50 border-pink-200',
-            },
-            {
-              icon: <CheckCircle className="w-4 h-4 text-indigo-600" />,
-              label: 'Entregues',
-              value: String(monthSummary.delivered),
-              bg: 'bg-indigo-50 border-indigo-200',
-            },
-            {
-              icon: <Clock className="w-4 h-4 text-amber-600" />,
-              label: 'A entregar',
-              value: String(monthSummary.pending),
-              bg: 'bg-amber-50 border-amber-200',
-            },
+            { icon: <TrendingUp className="w-4 h-4 text-emerald-600" />, label: 'Faturamento do mês', value: formatBRL(monthSummary.total), bg: 'bg-emerald-50 border-emerald-200' },
+            { icon: <Cake className="w-4 h-4 text-pink-600" />, label: 'Pedidos no mês', value: String(monthSummary.count), bg: 'bg-pink-50 border-pink-200' },
+            { icon: <CheckCircle className="w-4 h-4 text-indigo-600" />, label: 'Entregues', value: String(monthSummary.delivered), bg: 'bg-indigo-50 border-indigo-200' },
+            { icon: <Clock className="w-4 h-4 text-amber-600" />, label: 'A entregar', value: String(monthSummary.pending), bg: 'bg-amber-50 border-amber-200' },
           ].map((card) => (
-            <div
-              key={card.label}
-              className={cx('rounded-2xl border p-3 flex flex-col gap-1', card.bg)}
-            >
-              <div className="flex items-center gap-1.5 text-xs text-gray-600">
-                {card.icon}
-                {card.label}
-              </div>
+            <div key={card.label} className={cx('rounded-2xl border p-3 flex flex-col gap-1', card.bg)}>
+              <div className="flex items-center gap-1.5 text-xs text-gray-600">{card.icon}{card.label}</div>
               <div className="text-xl font-bold text-gray-900">{card.value}</div>
             </div>
           ))}
@@ -867,28 +896,18 @@ useEffect(() => {
 
         {/* Abas */}
         <div className="flex gap-1 bg-white/60 rounded-2xl p-1 ring-1 ring-pink-100 no-print w-fit">
-          <button
-            onClick={() => setActiveTab('todo')}
-            className={cx(
-              'px-4 py-2 rounded-xl text-sm font-medium transition-all',
-              activeTab === 'todo'
-                ? 'bg-pink-600 text-white shadow'
-                : 'text-gray-600 hover:bg-pink-50'
-            )}
-          >
-            📋 Lista de Bolos
-          </button>
-          <button
-            onClick={() => setActiveTab('calendar')}
-            className={cx(
-              'px-4 py-2 rounded-xl text-sm font-medium transition-all',
-              activeTab === 'calendar'
-                ? 'bg-pink-600 text-white shadow'
-                : 'text-gray-600 hover:bg-pink-50'
-            )}
-          >
-            📅 Calendário
-          </button>
+          {([['todo', '📋 Lista de Bolos'], ['calendar', '📅 Calendário']] as [Tab, string][]).map(([tab, label]) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={cx(
+                'px-4 py-2 rounded-xl text-sm font-medium transition-all',
+                activeTab === tab ? 'bg-pink-600 text-white shadow' : 'text-gray-600 hover:bg-pink-50'
+              )}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         {/* ===== ABA: LISTA DE BOLOS A FAZER ===== */}
@@ -896,73 +915,59 @@ useEffect(() => {
           <div className="space-y-6">
             {loading ? (
               <div className="space-y-3 animate-pulse">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="h-32 bg-white/70 rounded-2xl" />
-                ))}
+                {[1, 2, 3].map((i) => <div key={i} className="h-32 bg-white/70 rounded-2xl" />)}
               </div>
             ) : (
               <>
-                {/* Atrasados */}
                 {overdueOrders.length > 0 && (
                   <div>
-                    <h2 className="text-sm font-semibold text-rose-700 mb-2 flex items-center gap-1.5">
-                      ⚠️ Atrasados ({overdueOrders.length})
-                    </h2>
+                    <h2 className="text-sm font-semibold text-rose-700 mb-2">⚠️ Atrasados ({overdueOrders.length})</h2>
                     <div className="space-y-3 print-area">
                       {overdueOrders.map((o) => (
-                        <OrderCard key={o.id} o={o} showDateEdit />
+                        <OrderCard key={o.id} o={o} showDateEdit todayStr={todayStr} tomorrowStr={tomorrowStr} saving={saving} onUpdateStatus={updateStatus} onUpdateDate={updateDate} onDelete={setConfirmDelete} />
                       ))}
                     </div>
                   </div>
                 )}
 
-                {/* Hoje */}
                 {(() => {
-                  const todayOrders = todoOrders.filter((o) => o.deliveryDate === todayStr);
-                  return todayOrders.length > 0 ? (
+                  const list = todoOrders.filter((o) => o.deliveryDate === todayStr);
+                  return list.length > 0 ? (
                     <div>
-                      <h2 className="text-sm font-semibold text-indigo-700 mb-2 flex items-center gap-1.5">
-                        📦 Hoje — {new Date(todayStr + 'T00:00:00').toLocaleDateString('pt-BR')} ({todayOrders.length})
+                      <h2 className="text-sm font-semibold text-indigo-700 mb-2">
+                        📦 Hoje — {new Date(todayStr + 'T00:00:00').toLocaleDateString('pt-BR')} ({list.length})
                       </h2>
                       <div className="space-y-3 print-area">
-                        {todayOrders.map((o) => (
-                          <OrderCard key={o.id} o={o} showDateEdit={false} />
+                        {list.map((o) => (
+                          <OrderCard key={o.id} o={o} todayStr={todayStr} tomorrowStr={tomorrowStr} saving={saving} onUpdateStatus={updateStatus} onUpdateDate={updateDate} onDelete={setConfirmDelete} />
                         ))}
                       </div>
                     </div>
                   ) : null;
                 })()}
 
-                {/* Amanhã */}
                 {(() => {
-                  const tomorrowOrders = todoOrders.filter((o) => o.deliveryDate === tomorrowStr);
-                  return tomorrowOrders.length > 0 ? (
+                  const list = todoOrders.filter((o) => o.deliveryDate === tomorrowStr);
+                  return list.length > 0 ? (
                     <div>
-                      <h2 className="text-sm font-semibold text-amber-700 mb-2 flex items-center gap-1.5">
-                        ⏰ Amanhã ({tomorrowOrders.length})
-                      </h2>
+                      <h2 className="text-sm font-semibold text-amber-700 mb-2">⏰ Amanhã ({list.length})</h2>
                       <div className="space-y-3">
-                        {tomorrowOrders.map((o) => (
-                          <OrderCard key={o.id} o={o} showDateEdit={false} />
+                        {list.map((o) => (
+                          <OrderCard key={o.id} o={o} todayStr={todayStr} tomorrowStr={tomorrowStr} saving={saving} onUpdateStatus={updateStatus} onUpdateDate={updateDate} onDelete={setConfirmDelete} />
                         ))}
                       </div>
                     </div>
                   ) : null;
                 })()}
 
-                {/* Próximos */}
                 {(() => {
-                  const nextOrders = todoOrders.filter(
-                    (o) => o.deliveryDate! > tomorrowStr
-                  );
-                  return nextOrders.length > 0 ? (
+                  const list = todoOrders.filter((o) => o.deliveryDate! > tomorrowStr);
+                  return list.length > 0 ? (
                     <div>
-                      <h2 className="text-sm font-semibold text-gray-600 mb-2 flex items-center gap-1.5">
-                        🗓️ Próximos ({nextOrders.length})
-                      </h2>
+                      <h2 className="text-sm font-semibold text-gray-600 mb-2">🗓️ Próximos ({list.length})</h2>
                       <div className="space-y-3">
-                        {nextOrders.map((o) => (
-                          <OrderCard key={o.id} o={o} showDateEdit={false} />
+                        {list.map((o) => (
+                          <OrderCard key={o.id} o={o} todayStr={todayStr} tomorrowStr={tomorrowStr} saving={saving} onUpdateStatus={updateStatus} onUpdateDate={updateDate} onDelete={setConfirmDelete} />
                         ))}
                       </div>
                     </div>
@@ -983,24 +988,13 @@ useEffect(() => {
         {/* ===== ABA: CALENDÁRIO ===== */}
         {activeTab === 'calendar' && (
           <div className="grid md:grid-cols-2 gap-6">
-            {/* Calendário */}
             <div className="bg-white/80 backdrop-blur rounded-2xl shadow-lg ring-1 ring-pink-100 overflow-hidden">
               <div className="p-4 border-b bg-gradient-to-r from-pink-50 to-rose-50 flex items-center justify-between">
-                <button
-                  className="p-2 rounded-lg hover:bg-white border border-pink-100"
-                  onClick={prevMonth}
-                  aria-label="Mês anterior"
-                >
+                <button className="p-2 rounded-lg hover:bg-white border border-pink-100" onClick={prevMonth} aria-label="Mês anterior">
                   <ChevronLeft className="w-5 h-5 text-pink-700" />
                 </button>
-                <div className="text-pink-900 font-semibold capitalize">
-                  {ptMonthYear(year, month)}
-                </div>
-                <button
-                  className="p-2 rounded-lg hover:bg-white border border-pink-100"
-                  onClick={nextMonth}
-                  aria-label="Próximo mês"
-                >
+                <div className="text-pink-900 font-semibold capitalize">{ptMonthYear(year, month)}</div>
+                <button className="p-2 rounded-lg hover:bg-white border border-pink-100" onClick={nextMonth} aria-label="Próximo mês">
                   <ChevronRight className="w-5 h-5 text-pink-700" />
                 </button>
               </div>
@@ -1025,9 +1019,7 @@ useEffect(() => {
                           onClick={() => c.dateStr && setSelectedDate(c.dateStr)}
                           className={cx(
                             'aspect-square rounded-xl border text-xs flex flex-col items-center justify-center select-none transition-all',
-                            c.inMonth
-                              ? 'bg-white hover:bg-pink-50 border-pink-100'
-                              : 'bg-gray-50 text-gray-300 border-gray-100',
+                            c.inMonth ? 'bg-white hover:bg-pink-50 border-pink-100' : 'bg-gray-50 text-gray-300 border-gray-100',
                             isT && c.inMonth && 'ring-2 ring-pink-400',
                             isSel && c.inMonth && 'bg-pink-100 border-pink-300'
                           )}
@@ -1047,10 +1039,7 @@ useEffect(() => {
                 )}
 
                 <div className="mt-3 flex items-center justify-between">
-                  <button
-                    onClick={goToday}
-                    className="px-3 py-1.5 rounded-lg border border-pink-200 bg-white hover:bg-pink-50 text-pink-700 text-sm"
-                  >
+                  <button onClick={goToday} className="px-3 py-1.5 rounded-lg border border-pink-200 bg-white hover:bg-pink-50 text-pink-700 text-sm">
                     Hoje
                   </button>
                   <span className="text-xs text-gray-400">Clique num dia para ver</span>
@@ -1058,7 +1047,6 @@ useEffect(() => {
               </div>
             </div>
 
-            {/* Lista do dia selecionado */}
             <div className="bg-white/80 backdrop-blur rounded-2xl shadow-lg ring-1 ring-pink-100 overflow-hidden print-area">
               <div className="p-4 border-b bg-gradient-to-r from-pink-50 to-rose-50 flex items-center justify-between">
                 <div>
@@ -1067,9 +1055,7 @@ useEffect(() => {
                     {new Date(selectedDate + 'T00:00:00').toLocaleDateString('pt-BR')}
                   </div>
                 </div>
-                <div className="text-sm font-semibold text-pink-900">
-                  {formatBRL(totalDoDia)}
-                </div>
+                <div className="text-sm font-semibold text-pink-900">{formatBRL(totalDoDia)}</div>
               </div>
 
               <div className="p-4 space-y-3 max-h-[600px] overflow-y-auto">
@@ -1078,12 +1064,10 @@ useEffect(() => {
                     {[1, 2].map((i) => <div key={i} className="h-20 bg-gray-100/60 rounded-xl" />)}
                   </div>
                 ) : selectedOrders.length === 0 ? (
-                  <div className="text-gray-400 text-center py-8 text-sm">
-                    Nenhuma entrega nesta data.
-                  </div>
+                  <div className="text-gray-400 text-center py-8 text-sm">Nenhuma entrega nesta data.</div>
                 ) : (
                   selectedOrders.map((o) => (
-                    <OrderCard key={o.id} o={o} showDateEdit />
+                    <OrderCard key={o.id} o={o} showDateEdit todayStr={todayStr} tomorrowStr={tomorrowStr} saving={saving} onUpdateStatus={updateStatus} onUpdateDate={updateDate} onDelete={setConfirmDelete} />
                   ))
                 )}
               </div>
