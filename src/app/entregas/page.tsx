@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
+import QRCode from 'qrcode';
 import {
   Calendar,
   ChevronLeft,
@@ -14,6 +15,8 @@ import {
   Clock,
   TrendingUp,
   Circle,
+  Smartphone,
+  X,
 } from 'lucide-react';
 
 /* ========= Tipos ========= */
@@ -270,48 +273,105 @@ export default function DeliveriesDashboard() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('todo');
+  const [showQR, setShowQR] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [qrLoading, setQrLoading] = useState(false);
 
   /* ---- Load ---- */
-  useEffect(() => {
-    if (!isBrowser) return;
-    let ignore = false;
+useEffect(() => {
+  let ignore = false;
+  let bc: BroadcastChannel | null = null;
 
-    async function load() {
+  const run = async () => {
+
+    const load = async () => {
       setLoading(true);
       try {
         const all = await storageGetAll('orders');
         if (!ignore) setOrders(all);
       } catch (e) {
         console.error(e);
-        if (!ignore) setMessage({ type: 'error', text: 'Falha ao carregar pedidos.' });
+        if (!ignore)
+          setMessage({ type: 'error', text: 'Falha ao carregar pedidos.' });
       } finally {
         if (!ignore) setLoading(false);
       }
+    };
+
+    await load();
+
+    // Detecta ?import=
+    const params = new URLSearchParams(window.location.search);
+    const importParam = params.get('import');
+
+    if (importParam) {
+      try {
+        const json = decodeURIComponent(
+          escape(atob(decodeURIComponent(importParam)))
+        );
+
+        const imported: Order[] = JSON.parse(json);
+
+        if (Array.isArray(imported) && imported.length > 0) {
+          const db = await storageGetAll('orders');
+          const merged = [...db];
+
+          for (const imp of imported) {
+            const idx = merged.findIndex((o) => o.id === imp.id);
+            if (idx >= 0) merged[idx] = imp;
+            else merged.push(imp);
+          }
+
+          await Promise.all(
+            imported.map((o) => storagePut('orders', o))
+          );
+
+          if (!ignore) {
+            setOrders(merged);
+            setMessage({
+              type: 'success',
+              text: `${imported.length} pedido(s) importado(s) do computador!`,
+            });
+          }
+
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+      } catch (e) {
+        console.error('Falha ao importar QR', e);
+      }
     }
 
-    load();
-
-    let bc: BroadcastChannel | null = null;
     try {
       if ('BroadcastChannel' in window) {
         bc = new BroadcastChannel('cake_sync');
         bc.onmessage = (ev) => {
-          if ((ev as MessageEvent)?.data?.type === 'orders_changed') load();
+          if ((ev as MessageEvent)?.data?.type === 'orders_changed') {
+            load();
+          }
         };
       }
-    } catch { /* ignore */ }
+    } catch {}
 
     const onVisibility = () => {
       if (document.visibilityState === 'visible') load();
     };
+
     document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
-      ignore = true;
       document.removeEventListener('visibilitychange', onVisibility);
-      try { bc?.close(); } catch { /* ignore */ }
+      try {
+        bc?.close();
+      } catch {}
     };
-  }, []);
+  };
+
+  run();
+
+  return () => {
+    ignore = true;
+  };
+}, []);
 
   useEffect(() => {
     if (!message) return;
@@ -622,6 +682,34 @@ export default function DeliveriesDashboard() {
     );
   }
 
+  /* ---- QR Code ---- */
+  async function handleGenerateQR() {
+    setQrLoading(true);
+    setShowQR(true);
+    try {
+      const active = orders.filter(
+        (o) => o.status !== 'delivered' && o.status !== 'canceled'
+      );
+      const payload = JSON.stringify(active);
+      const b64 = btoa(unescape(encodeURIComponent(payload)));
+      const importUrl = `${window.location.origin}/entregas?import=${encodeURIComponent(b64)}`;
+
+      // Gera QR 100% local — nenhum dado sai do navegador
+      const dataUrl = await QRCode.toDataURL(importUrl, {
+        width: 280,
+        margin: 2,
+        color: { dark: '#1a1a1a', light: '#ffffff' },
+      });
+      setQrDataUrl(dataUrl);
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: 'error', text: 'Falha ao gerar QR code.' });
+      setShowQR(false);
+    } finally {
+      setQrLoading(false);
+    }
+  }
+
   /* ---- Render ---- */
   return (
     <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-fuchsia-50 p-4 sm:p-6">
@@ -662,6 +750,51 @@ export default function DeliveriesDashboard() {
         onCancel={() => setConfirmDelete(null)}
       />
 
+      {/* Modal QR Code */}
+      {showQR && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full overflow-hidden">
+            <div className="p-4 border-b bg-gradient-to-r from-pink-50 to-rose-50 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Smartphone className="w-5 h-5 text-pink-600" />
+                <h3 className="font-semibold text-pink-900">Abrir no celular</h3>
+              </div>
+              <button onClick={() => { setShowQR(false); setQrDataUrl(null); }} className="p-1.5 rounded-lg hover:bg-pink-100 text-gray-500">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 text-center space-y-4">
+              {qrLoading ? (
+                <div className="w-[200px] h-[200px] mx-auto bg-gray-100 rounded-xl animate-pulse" />
+              ) : qrDataUrl ? (
+                <>
+                  <img
+                    src={qrDataUrl}
+                    alt="QR Code para abrir no celular"
+                    className="mx-auto rounded-xl border border-gray-200"
+                    width={280}
+                    height={280}
+                  />
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-gray-800">
+                      Aponte a câmera do celular para este código
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Os pedidos pendentes e confirmados serão carregados automaticamente
+                    </p>
+                  </div>
+                  <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-800">
+                    ⚠️ O QR expira quando você fechar esta janela. Gere um novo sempre que quiser atualizar o celular.
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-rose-600">Falha ao gerar QR. Tente novamente.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between no-print">
@@ -676,6 +809,12 @@ export default function DeliveriesDashboard() {
             >
               ← Novo Pedido
             </Link>
+            <button
+              onClick={handleGenerateQR}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-emerald-200 bg-white hover:bg-emerald-50 text-emerald-700 text-sm"
+            >
+              <Smartphone className="w-4 h-4" /> Abrir no celular
+            </button>
             <button
               onClick={() => window.print()}
               className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-sm"
