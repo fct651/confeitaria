@@ -40,7 +40,7 @@ interface Order {
 /* ========= Ambiente ========= */
 const isBrowser = typeof window !== 'undefined';
 const hasIndexedDB = isBrowser && typeof window.indexedDB !== 'undefined';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 type StoreName = 'orders';
 type StoreMap = { orders: Order };
